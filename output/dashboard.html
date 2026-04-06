@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>电商店铺数据看板</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&family=DM+Sans:wght@400;500;700&display=swap');
+
+:root {
+  --bg: #0a0e17;
+  --surface: #111827;
+  --surface2: #1a2236;
+  --border: #1e293b;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #38bdf8;
+  --accent2: #818cf8;
+  --profit-color: #34d399;
+  --traffic-color: #fbbf24;
+  --basic-color: #60a5fa;
+  --adjust-color: #a78bfa;
+  --warn: #f87171;
+  --warn-bg: rgba(248,113,113,0.08);
+  --good: #34d399;
+  --radius: 14px;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Noto Sans SC', 'DM Sans', sans-serif;
+  min-height: 100vh;
+}
+
+/* ── Loading ── */
+.loading-screen {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); z-index: 9999;
+  transition: opacity .4s;
+}
+.loading-screen.hidden { opacity: 0; pointer-events: none; }
+.spinner {
+  width: 36px; height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Header ── */
+.header {
+  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+  border-bottom: 1px solid var(--border);
+  padding: 20px 32px;
+  position: sticky; top: 0; z-index: 100;
+}
+.header-top {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px;
+}
+.header h1 {
+  font-size: 22px; font-weight: 700;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.data-date {
+  font-size: 12px; color: var(--text-muted);
+  background: var(--surface); padding: 4px 12px;
+  border-radius: 20px; border: 1px solid var(--border);
+}
+.filters { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.filter-group { display: flex; align-items: center; gap: 6px; }
+.filter-group label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.filter-group select {
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); padding: 6px 28px 6px 10px;
+  border-radius: 8px; font-size: 13px; font-family: inherit;
+  cursor: pointer; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 8px center;
+  transition: border-color .2s;
+}
+.filter-group select:hover { border-color: var(--accent); }
+.filter-group select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(56,189,248,0.15); }
+
+/* ── Main ── */
+.main { padding: 24px 32px 48px; max-width: 1440px; margin: 0 auto; }
+
+/* ── KPI Cards ── */
+.kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 28px; }
+.kpi-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px 22px;
+  position: relative; overflow: hidden;
+  transition: transform .2s, box-shadow .2s;
+}
+.kpi-card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.3); }
+.kpi-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.kpi-card:nth-child(1)::before { background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+.kpi-card:nth-child(2)::before { background: linear-gradient(90deg, var(--profit-color), #2dd4bf); }
+.kpi-card:nth-child(3)::before { background: linear-gradient(90deg, var(--traffic-color), #fb923c); }
+.kpi-card:nth-child(4)::before { background: linear-gradient(90deg, var(--accent2), #e879f9); }
+.kpi-card.warning { border-color: var(--warn); background: var(--warn-bg); }
+.kpi-card.warning::before { background: var(--warn) !important; }
+.kpi-label { font-size: 12px; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
+.kpi-value { font-size: 28px; font-weight: 700; font-family: 'DM Sans', sans-serif; line-height: 1; }
+.kpi-unit { font-size: 14px; color: var(--text-dim); font-weight: 400; margin-left: 2px; }
+.kpi-warn-badge {
+  position: absolute; top: 14px; right: 14px;
+  background: var(--warn); color: #fff;
+  font-size: 10px; font-weight: 700; padding: 2px 8px;
+  border-radius: 10px; animation: pulse 2s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+
+/* ── Section ── */
+.section-title {
+  font-size: 16px; font-weight: 700; margin-bottom: 16px;
+  padding-left: 12px; border-left: 3px solid var(--accent);
+}
+
+/* ── Category Grid ── */
+.cat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+.cat-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px; position: relative;
+}
+.cat-card.warning { border-color: var(--warn); }
+.cat-header { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.cat-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.cat-name { font-size: 14px; font-weight: 700; }
+.cat-warn-icon { margin-left: auto; color: var(--warn); font-size: 16px; }
+.cat-metrics { display: flex; flex-direction: column; gap: 10px; }
+.cat-metric { display: flex; justify-content: space-between; align-items: baseline; }
+.cat-metric-label { font-size: 11px; color: var(--text-muted); font-weight: 500; }
+.cat-metric-value { font-size: 14px; font-weight: 600; font-family: 'DM Sans', sans-serif; }
+.cat-metric-sub { font-size: 11px; color: var(--text-muted); margin-left: 4px; }
+.margin-good { color: var(--good); }
+.margin-warn { color: var(--warn); }
+
+/* ── Rank Panels ── */
+.rank-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.rank-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.rank-panel-header {
+  padding: 14px 16px 10px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.rank-panel-title { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px; }
+.rank-toggle { display: flex; gap: 2px; background: var(--bg); border-radius: 6px; padding: 2px; }
+.rank-toggle button {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 10px; font-family: inherit; padding: 3px 8px;
+  border-radius: 4px; cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.rank-toggle button.active { background: var(--accent); color: #0a0e17; font-weight: 600; }
+.rank-list { max-height: 340px; overflow-y: auto; padding: 6px 0; }
+.rank-list::-webkit-scrollbar { width: 4px; }
+.rank-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.rank-item { display: flex; align-items: center; padding: 8px 16px; gap: 10px; transition: background .15s; }
+.rank-item:hover { background: var(--surface2); }
+.rank-num {
+  width: 22px; height: 22px; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; font-family: 'DM Sans';
+  flex-shrink: 0; background: var(--surface2); color: var(--text-muted);
+}
+.rank-item:nth-child(1) .rank-num { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #0a0e17; }
+.rank-item:nth-child(2) .rank-num { background: linear-gradient(135deg, #94a3b8, #64748b); color: #0a0e17; }
+.rank-item:nth-child(3) .rank-num { background: linear-gradient(135deg, #b45309, #92400e); color: #fde68a; }
+.rank-sku { flex:1; font-size:11px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rank-val { font-size:12px; font-weight:600; font-family:'DM Sans'; color:var(--text); white-space:nowrap; }
+
+/* ── Error ── */
+.error-box {
+  background: var(--warn-bg); border: 1px solid var(--warn);
+  border-radius: var(--radius); padding: 32px; text-align: center;
+  margin: 80px auto; max-width: 600px;
+}
+.error-box h2 { color: var(--warn); margin-bottom: 12px; font-size: 18px; }
+.error-box p { color: var(--text-dim); font-size: 13px; line-height: 1.8; }
+.error-box code { background: var(--surface); padding: 2px 8px; border-radius: 4px; font-size: 12px; color: var(--accent); }
+
+/* ── Responsive ── */
+@media (max-width: 1200px) { .kpi-row, .cat-grid, .rank-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 640px)  { .kpi-row, .cat-grid, .rank-grid { grid-template-columns: 1fr; } .main { padding: 16px; } .header { padding: 16px; } }
+</style>
+</head>
+<body>
+
+<div class="loading-screen" id="loadingScreen">
+  <div class="spinner"></div>
+</div>
+
+<div class="header">
+  <div class="header-top">
+    <h1>📊 电商店铺经营数据看板</h1>
+    <div class="data-date" id="dataDate">数据截止日：加载中...</div>
+  </div>
+  <div class="filters">
+    <div class="filter-group">
+      <label>店铺</label>
+      <select id="filterStore"><option value="all">全部店铺</option></select>
+    </div>
+    <div class="filter-group">
+      <label>年月</label>
+      <select id="filterMonth"><option value="all">全部月份</option></select>
+    </div>
+    <div class="filter-group">
+      <label>产品定位</label>
+      <select id="filterCat">
+        <option value="all">全部定位</option>
+        <option value="利润款">利润款</option>
+        <option value="基础款">基础款</option>
+        <option value="流量款">流量款</option>
+        <option value="调整款">调整款</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<div class="main" id="mainContent" style="display:none;">
+  <div class="kpi-row" id="kpiRow"></div>
+  <div class="section-title">产品定位分析</div>
+  <div class="cat-grid" id="catGrid"></div>
+  <div class="section-title">款式排名看板（Top 20）</div>
+  <div class="rank-grid" id="rankGrid"></div>
+</div>
+
+<script>
+/*  ============================================================
+    配置：JSON 数据文件路径
+    ──────────────────────────────────────────────────────────
+    方式1（推荐）：把 dashboard_data.json 放到和本 HTML 同一目录
+          DATA_URL = './dashboard_data.json'
+
+    方式2：使用绝对路径或远程URL
+          DATA_URL = 'http://your-server.com/api/dashboard_data.json'
+
+    方式3：通过 URL 参数动态指定
+          dashboard.html?data=./output/202503.json
+    ============================================================ */
+const DATA_URL = new URLSearchParams(window.location.search).get('data')
+              || './dashboard_data.json';
+
+const CAT_COLORS = {
+  '利润款': '#34d399',
+  '基础款': '#60a5fa',
+  '流量款': '#fbbf24',
+  '调整款': '#a78bfa'
+};
+const CAT_ORDER = ['利润款', '流量款', '基础款', '调整款'];
+
+// ── 全局数据 ──
+let DB = null;
+
+// ── 加载 JSON ──
+async function loadData() {
+  try {
+    const resp = await fetch(DATA_URL);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+    DB = await resp.json();
+    initApp();
+  } catch (err) {
+    document.getElementById('loadingScreen').classList.add('hidden');
+    document.getElementById('mainContent').style.display = 'block';
+    document.getElementById('mainContent').innerHTML = `
+      <div class="error-box">
+        <h2>⚠️ 数据加载失败</h2>
+        <p>
+          无法读取 <code>${DATA_URL}</code><br><br>
+          请确认文件结构：<br>
+          <code>你的目录/</code><br>
+          <code>├── dashboard.html</code><br>
+          <code>└── dashboard_data.json</code><br><br>
+          或通过URL参数指定：<br>
+          <code>dashboard.html?data=./你的文件.json</code><br><br>
+          <b>注意：</b>直接双击打开HTML无法加载JSON（浏览器安全限制）。<br>
+          请使用本地服务器，最简单的方式：<br>
+          <code>python -m http.server 8080</code><br>
+          然后访问 <code>http://localhost:8080/dashboard.html</code><br><br>
+          错误详情：${err.message}
+        </p>
+      </div>`;
+  }
+}
+
+// ── 初始化 ──
+function initApp() {
+  // 填充筛选器
+  const storeSelect = document.getElementById('filterStore');
+  DB.meta.stores.forEach(s => {
+    const o = document.createElement('option');
+    o.value = s; o.textContent = s;
+    storeSelect.appendChild(o);
+  });
+
+  const monthSelect = document.getElementById('filterMonth');
+  DB.meta.months.forEach(m => {
+    const o = document.createElement('option');
+    o.value = m; o.textContent = m.replace('-', '年') + '月';
+    monthSelect.appendChild(o);
+  });
+
+  document.getElementById('dataDate').textContent = '数据截止日：' + DB.meta.data_cutoff;
+
+  // 绑定事件
+  storeSelect.addEventListener('change', render);
+  monthSelect.addEventListener('change', render);
+  document.getElementById('filterCat').addEventListener('change', render);
+
+  // 首次渲染
+  render();
+
+  // 隐藏loading
+  document.getElementById('loadingScreen').classList.add('hidden');
+  document.getElementById('mainContent').style.display = 'block';
+}
+
+// ── 获取当前筛选条件下的数据 ──
+function getFilteredData() {
+  const store = document.getElementById('filterStore').value;
+  const month = document.getElementById('filterMonth').value;
+
+  // 优先使用预计算的 summary（性能更好）
+  if (store === 'all' && month === 'all') {
+    return DB.summary['全部'];
+  }
+  if (store !== 'all' && month === 'all' && DB.summary['按店铺'][store]) {
+    return DB.summary['按店铺'][store];
+  }
+  if (store === 'all' && month !== 'all' && DB.summary['按月份'][month]) {
+    return DB.summary['按月份'][month];
+  }
+
+  // 组合筛选：从 raw_styles 实时计算
+  let styles = DB.raw_styles;
+  if (store !== 'all') styles = styles.filter(s => s.store === store);
+  if (month !== 'all') styles = styles.filter(s => s.year_month === month);
+
+  return computeSummary(styles);
+}
+
+// ── 从款式明细实时计算汇总（用于组合筛选） ──
+function computeSummary(styles) {
+  const totalGMV    = styles.reduce((s, d) => s + d.gmv, 0);
+  const totalQty    = styles.reduce((s, d) => s + d.qty, 0);
+  const totalProfit = styles.reduce((s, d) => s + d.profit, 0);
+  const totalMargin = totalGMV > 0 ? +(totalProfit / totalGMV * 100).toFixed(2) : 0;
+  const styleIDs    = new Set(styles.map(s => s.style_id));
+
+  const kpi = {
+    gmv: +totalGMV.toFixed(2),
+    qty: +totalQty.toFixed(1),
+    style_count: styleIDs.size,
+    margin_rate: totalMargin,
+    margin_warning: totalMargin < DB.config.global_margin_warning,
+  };
+
+  const categories = {};
+  CAT_ORDER.forEach(cat => {
+    const items = styles.filter(s => s.category === cat);
+    const catGMV    = items.reduce((s, d) => s + d.gmv, 0);
+    const catQty    = items.reduce((s, d) => s + d.qty, 0);
+    const catProfit = items.reduce((s, d) => s + d.profit, 0);
+    const catMargin = catGMV > 0 ? +(catProfit / catGMV * 100).toFixed(2) : 0;
+    const catIDs    = new Set(items.map(s => s.style_id));
+    const threshold = DB.config.category_thresholds[cat] || 0;
+
+    categories[cat] = {
+      style_count: catIDs.size,
+      gmv: +catGMV.toFixed(2),
+      gmv_share: totalGMV > 0 ? +(catGMV / totalGMV * 100).toFixed(2) : 0,
+      qty: +catQty.toFixed(1),
+      qty_share: totalQty > 0 ? +(catQty / totalQty * 100).toFixed(2) : 0,
+      margin_rate: catMargin,
+      margin_threshold: threshold,
+      margin_warning: catIDs.size > 0 && catMargin < threshold,
+    };
+  });
+
+  return { kpi, categories };
+}
+
+// ── 获取当前筛选下的款式列表（排名用） ──
+function getFilteredStyles() {
+  const store = document.getElementById('filterStore').value;
+  const month = document.getElementById('filterMonth').value;
+  const cat   = document.getElementById('filterCat').value;
+
+  let styles = DB.raw_styles;
+  if (store !== 'all') styles = styles.filter(s => s.store === store);
+  if (month !== 'all') styles = styles.filter(s => s.year_month === month);
+  if (cat   !== 'all') styles = styles.filter(s => s.category === cat);
+  return styles;
+}
+
+// ── 数字格式化 ──
+function fmtNum(n, decimals) {
+  if (decimals === undefined) decimals = 2;
+  if (Math.abs(n) >= 10000) return (n / 10000).toFixed(decimals) + '万';
+  return n.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// ── 渲染 ──
+function render() {
+  const data   = getFilteredData();
+  const styles = getFilteredStyles();
+  const kpi    = data.kpi;
+  const cats   = data.categories;
+
+  // ── KPI 卡片 ──
+  document.getElementById('kpiRow').innerHTML = `
+    <div class="kpi-card">
+      <div class="kpi-label">总 GMV</div>
+      <div class="kpi-value">¥${fmtNum(kpi.gmv)}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">总销售量</div>
+      <div class="kpi-value">${fmtNum(kpi.qty, 0)}<span class="kpi-unit">件</span></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">款式数</div>
+      <div class="kpi-value">${kpi.style_count}</div>
+    </div>
+    <div class="kpi-card ${kpi.margin_warning ? 'warning' : ''}">
+      <div class="kpi-label">综合毛利率</div>
+      <div class="kpi-value">${kpi.margin_rate.toFixed(1)}<span class="kpi-unit">%</span></div>
+      ${kpi.margin_warning ? '<div class="kpi-warn-badge">⚠ 低于目标</div>' : ''}
+    </div>`;
+
+  // ── 产品定位卡片 ──
+  let catHTML = '';
+  CAT_ORDER.forEach(cat => {
+    const c = cats[cat];
+    catHTML += `
+      <div class="cat-card ${c.margin_warning ? 'warning' : ''}">
+        <div class="cat-header">
+          <div class="cat-dot" style="background:${CAT_COLORS[cat]}"></div>
+          <div class="cat-name">${cat}</div>
+          ${c.margin_warning ? '<div class="cat-warn-icon">⚠</div>' : ''}
+        </div>
+        <div class="cat-metrics">
+          <div class="cat-metric">
+            <span class="cat-metric-label">款式数</span>
+            <span class="cat-metric-value">${c.style_count}</span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label">GMV</span>
+            <span class="cat-metric-value">¥${fmtNum(c.gmv)}<span class="cat-metric-sub">(${c.gmv_share}%)</span></span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label">销售量</span>
+            <span class="cat-metric-value">${fmtNum(c.qty, 0)}<span class="cat-metric-sub">(${c.qty_share}%)</span></span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label">平均毛利率</span>
+            <span class="cat-metric-value ${c.style_count > 0 ? (c.margin_warning ? 'margin-warn' : 'margin-good') : ''}">${c.style_count > 0 ? c.margin_rate.toFixed(1) + '%' : '-'}</span>
+          </div>
+          <div class="cat-metric">
+            <span class="cat-metric-label" style="font-size:10px">毛利率标准 ≥${c.margin_threshold}%</span>
+            <span></span>
+          </div>
+        </div>
+      </div>`;
+  });
+  document.getElementById('catGrid').innerHTML = catHTML;
+
+  // ── 排名看板 ──
+  let rankHTML = '';
+  CAT_ORDER.forEach(cat => {
+    const catStyles = styles.filter(s => s.category === cat);
+    rankHTML += `
+      <div class="rank-panel" data-cat="${cat}">
+        <div class="rank-panel-header">
+          <div class="rank-panel-title">
+            <span style="width:8px;height:8px;border-radius:50%;background:${CAT_COLORS[cat]};display:inline-block"></span>
+            ${cat}
+          </div>
+          <div class="rank-toggle">
+            <button class="active" onclick="switchRank(this,'${cat}','gmv')">GMV</button>
+            <button onclick="switchRank(this,'${cat}','qty')">销售量</button>
+            <button onclick="switchRank(this,'${cat}','margin')">毛利率</button>
+          </div>
+        </div>
+        <div class="rank-list" id="rank-${cat}">
+          ${buildRankItems(catStyles, 'gmv')}
+        </div>
+      </div>`;
+  });
+  document.getElementById('rankGrid').innerHTML = rankHTML;
+}
+
+// ── 排名列表 ──
+function buildRankItems(items, metric) {
+  let sorted;
+  if (metric === 'gmv')    sorted = [...items].sort((a, b) => b.gmv - a.gmv);
+  else if (metric === 'qty') sorted = [...items].sort((a, b) => b.qty - a.qty);
+  else                       sorted = [...items].sort((a, b) => b.margin_rate - a.margin_rate);
+
+  const top = sorted.slice(0, 20);
+  if (!top.length) return '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:12px">暂无数据</div>';
+
+  return top.map((item, i) => {
+    let val;
+    if (metric === 'gmv')    val = '¥' + fmtNum(item.gmv);
+    else if (metric === 'qty') val = fmtNum(item.qty, 0) + '件';
+    else                       val = item.margin_rate.toFixed(1) + '%';
+
+    return `
+      <div class="rank-item">
+        <div class="rank-num">${i + 1}</div>
+        <div class="rank-sku" title="${item.style_id}">${item.style_id}</div>
+        <div class="rank-val">${val}</div>
+      </div>`;
+  }).join('');
+}
+
+function switchRank(btn, cat, metric) {
+  const panel = btn.closest('.rank-panel');
+  panel.querySelectorAll('.rank-toggle button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+
+  const styles = getFilteredStyles().filter(s => s.category === cat);
+  document.getElementById(`rank-${cat}`).innerHTML = buildRankItems(styles, metric);
+}
+
+// ── 启动 ──
+loadData();
+</script>
+</body>
+</html>
