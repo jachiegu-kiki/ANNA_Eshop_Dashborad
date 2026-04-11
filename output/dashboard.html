@@ -235,6 +235,14 @@ body {
       <label>采购方式</label>
       <select id="filterMethod"><option value="all">全部方式</option></select>
     </div>
+    <div class="filter-group">
+      <label>目标毛利率</label>
+      <input type="number" id="targetMargin" value="35" min="0" max="100" step="1"
+        style="width:60px;background:var(--surface);color:var(--text);border:1px solid var(--border);
+        padding:6px 8px;border-radius:8px;font-size:13px;font-family:inherit;text-align:center"
+        onchange="onTargetMarginChange(this.value)">
+      <span style="color:var(--text-muted);font-size:12px">%</span>
+    </div>
   </div>
 </div>
 
@@ -249,6 +257,7 @@ body {
   <div class="cat-grid" id="methodGrid"></div>
 
   <div style="display:flex;gap:12px;margin-top:32px;flex-wrap:wrap">
+    <button class="dl-btn" onclick="downloadFile('采购明细表.xlsx')">⬇ 采购明细表</button>
     <button class="dl-btn" onclick="downloadFile('待人工处理清单.xlsx')">⬇ 待人工处理清单</button>
     <button class="dl-btn" onclick="downloadFile('回填报告.xlsx')">⬇ 回填报告</button>
   </div>
@@ -338,6 +347,17 @@ function initApp() {
     });
   }
 
+  // 加载目标毛利率
+  fetch('/api/target-margin').then(r => r.json()).then(data => {
+    const margin = data.target_margin || 35;
+    document.getElementById('targetMargin').value = margin;
+    DB.config.global_margin_warning = margin;
+    render();
+  }).catch(() => {
+    // 静态模式（无服务器），使用 JSON 中的值
+    document.getElementById('targetMargin').value = DB.config.global_margin_warning || 35;
+  });
+
   document.getElementById('dataDate').textContent = '数据截止日：' + DB.meta.data_cutoff;
 
   // 绑定事件
@@ -352,6 +372,32 @@ function initApp() {
   // 隐藏loading
   document.getElementById('loadingScreen').classList.add('hidden');
   document.getElementById('mainContent').style.display = 'block';
+}
+
+// ── 目标毛利率变更 ──
+function onTargetMarginChange(val) {
+  const margin = parseFloat(val);
+  if (isNaN(margin) || margin < 0 || margin > 100) return;
+
+  // 立即更新前端显示
+  DB.config.global_margin_warning = margin;
+  render();
+
+  // 保存到后端并重跑管道（后台执行，不阻塞UI）
+  fetch('/api/target-margin', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({target_margin: margin})
+  }).then(r => r.json()).then(data => {
+    if (data.success && data.pipeline && data.pipeline.success) {
+      // 管道重跑完成，重新加载最新数据
+      fetch(DATA_URL).then(r => r.json()).then(newData => {
+        DB = newData;
+        DB.config.global_margin_warning = margin;
+        render();
+      });
+    }
+  }).catch(() => { /* 静态模式，忽略 */ });
 }
 
 // ── 获取当前筛选条件下的数据 ──
@@ -572,7 +618,7 @@ function render() {
           <div class="cat-metric"><span class="cat-metric-label">款式数</span><span class="cat-metric-value">${v.count.size}</span></div>
           <div class="cat-metric"><span class="cat-metric-label">GMV</span><span class="cat-metric-value">¥${fmtNum(v.gmv)}<span class="cat-metric-sub">(${gmvShare.toFixed(1)}%)</span></span></div>
           <div class="cat-metric"><span class="cat-metric-label">销售量</span><span class="cat-metric-value">${fmtNum(v.qty, 0)}<span class="cat-metric-sub">(${qtyShare.toFixed(1)}%)</span></span></div>
-          <div class="cat-metric"><span class="cat-metric-label">平均毛利率</span><span class="cat-metric-value ${margin >= 35 ? 'margin-good' : 'margin-warn'}">${margin.toFixed(1)}%</span></div>
+          <div class="cat-metric"><span class="cat-metric-label">平均毛利率</span><span class="cat-metric-value ${margin >= DB.config.global_margin_warning ? 'margin-good' : 'margin-warn'}">${margin.toFixed(1)}%</span></div>
         </div>
       </div>`;
   });
