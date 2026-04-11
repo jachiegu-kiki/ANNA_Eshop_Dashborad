@@ -379,8 +379,9 @@ function onTargetMarginChange(val) {
   const margin = parseFloat(val);
   if (isNaN(margin) || margin < 0 || margin > 100) return;
 
-  // 立即更新前端显示
+  // 更新全局阈值 & 前端即时重分类
   DB.config.global_margin_warning = margin;
+  reclassifyStyles(margin);
   render();
 
   // 保存到后端并重跑管道（后台执行，不阻塞UI）
@@ -390,14 +391,36 @@ function onTargetMarginChange(val) {
     body: JSON.stringify({target_margin: margin})
   }).then(r => r.json()).then(data => {
     if (data.success && data.pipeline && data.pipeline.success) {
-      // 管道重跑完成，重新加载最新数据
       fetch(DATA_URL).then(r => r.json()).then(newData => {
         DB = newData;
         DB.config.global_margin_warning = margin;
+        reclassifyStyles(margin);
         render();
       });
     }
   }).catch(() => { /* 静态模式，忽略 */ });
+}
+
+// ── 前端即时重分类（与后端 classify_styles 逻辑一致） ──
+function reclassifyStyles(targetMargin) {
+  const upper = targetMargin + 10;
+  const lower = targetMargin - 10;
+  DB.raw_styles.forEach(s => {
+    s.target_margin = targetMargin;
+    if (s.margin_rate >= upper) {
+      s.category = '利润款';
+    } else if (s.margin_rate >= lower && s.margin_rate <= upper) {
+      s.category = '基础款';
+    } else if (s.margin_rate <= lower && s.qty_share >= (DB.config.traffic_qty_share_threshold || 5)) {
+      s.category = '流量款';
+    } else {
+      s.category = '调整款';
+    }
+  });
+  // 清除预计算summary，强制使用实时计算
+  DB.summary['全部'] = null;
+  DB.summary['按店铺'] = {};
+  DB.summary['按月份'] = {};
 }
 
 // ── 获取当前筛选条件下的数据 ──
@@ -415,13 +438,13 @@ function getFilteredData() {
   }
 
   // 优先使用预计算的 summary（性能更好）
-  if (store === 'all' && month === 'all') {
+  if (store === 'all' && month === 'all' && DB.summary['全部']) {
     return DB.summary['全部'];
   }
-  if (store !== 'all' && month === 'all' && DB.summary['按店铺'][store]) {
+  if (store !== 'all' && month === 'all' && DB.summary['按店铺'] && DB.summary['按店铺'][store]) {
     return DB.summary['按店铺'][store];
   }
-  if (store === 'all' && month !== 'all' && DB.summary['按月份'][month]) {
+  if (store === 'all' && month !== 'all' && DB.summary['按月份'] && DB.summary['按月份'][month]) {
     return DB.summary['按月份'][month];
   }
 
