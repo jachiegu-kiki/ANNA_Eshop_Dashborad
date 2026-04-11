@@ -242,11 +242,6 @@ A_REPLEN_SHEET_CONFIG = {
     "4月":        {"sku_col": "货品编码",       "date_col": "日期"},
 }
 B_REPLEN_SHEET_CONFIG = {"sheet_name": "補貨表", "sku_col": "货品编码", "date_col": "采购日期"}
-# B组备选配置：适配不同版本的B组采购表
-B_REPLEN_FALLBACK_CONFIGS = [
-    {"sheet_name": None, "header_row": 1, "sku_col": "货品编码", "date_col": "采购日期",
-     "price_col": "实际采购价", "qty_col": "商品数量", "amount_col": "实付金额"},
-]
 REPLEN_COMMON_COLS = {"price_col": "采购价", "qty_col": "实际采购", "amount_col": "合计金额"}
 
 
@@ -269,9 +264,9 @@ def _parse_excel_date(val):
     return pd.to_datetime(val, errors="coerce")
 
 
-def _parse_replen_sheet(filepath, sheet_name, sku_col, date_col, header_row=2) -> pd.DataFrame:
+def _parse_replen_sheet(filepath, sheet_name, sku_col, date_col) -> pd.DataFrame:
     """解析单个补货 sheet，返回统一格式"""
-    df = pd.read_excel(filepath, sheet_name=sheet_name, header=header_row, engine="openpyxl")
+    df = pd.read_excel(filepath, sheet_name=sheet_name, header=2)
     required = [sku_col, date_col, REPLEN_COMMON_COLS["price_col"],
                 REPLEN_COMMON_COLS["qty_col"], REPLEN_COMMON_COLS["amount_col"]]
     missing = [c for c in required if c not in df.columns]
@@ -311,8 +306,6 @@ def build_replenishment_master(
                 logger.warning(f"补货表 A组[{sheet_name}] 失败: {e}")
 
     if b_filepath and Path(b_filepath).exists():
-        b_loaded = False
-        # 尝试主配置
         cfg = B_REPLEN_SHEET_CONFIG
         try:
             sub = _parse_replen_sheet(b_filepath, cfg["sheet_name"], cfg["sku_col"], cfg["date_col"])
@@ -320,42 +313,8 @@ def build_replenishment_master(
             if len(sub) > 0:
                 frames.append(sub)
                 logger.info(f"补货表 B组: {len(sub)} 行")
-                b_loaded = True
         except Exception as e:
-            logger.debug(f"补货表 B组主配置失败: {e}，尝试备选配置")
-
-        # 主配置失败 → 遍历所有sheet用备选列映射
-        if not b_loaded:
-            xl_sheets = pd.ExcelFile(b_filepath, engine="openpyxl").sheet_names
-            for fb in B_REPLEN_FALLBACK_CONFIGS:
-                target_sheets = [fb["sheet_name"]] if fb["sheet_name"] else xl_sheets
-                for sn in target_sheets:
-                    try:
-                        hr = fb.get("header_row", 2)
-                        df_b = pd.read_excel(b_filepath, sheet_name=sn, header=hr, engine="openpyxl")
-                        p_col = fb.get("price_col", REPLEN_COMMON_COLS["price_col"])
-                        q_col = fb.get("qty_col", REPLEN_COMMON_COLS["qty_col"])
-                        a_col = fb.get("amount_col", REPLEN_COMMON_COLS["amount_col"])
-                        required = [fb["sku_col"], fb["date_col"], p_col, q_col]
-                        missing = [c for c in required if c not in df_b.columns]
-                        if missing:
-                            continue
-                        sub = pd.DataFrame({
-                            "采购日期": pd.to_datetime(df_b[fb["date_col"]], errors="coerce"),
-                            "货品编码": df_b[fb["sku_col"]].apply(_norm_sku),
-                            "采购单价": pd.to_numeric(df_b[p_col], errors="coerce"),
-                            "数量":     pd.to_numeric(df_b[q_col], errors="coerce"),
-                            "合计金额": pd.to_numeric(df_b.get(a_col, pd.Series(dtype=float)), errors="coerce"),
-                            "来源":     f"B组-{sn}",
-                        })
-                        if len(sub) > 0:
-                            frames.append(sub)
-                            logger.info(f"补货表 B组[{sn}]: {len(sub)} 行 (备选配置)")
-                            b_loaded = True
-                    except Exception as e:
-                        logger.debug(f"补货表 B组[{sn}] 备选失败: {e}")
-            if not b_loaded:
-                logger.warning("补货表 B组: 所有配置均失败")
+            logger.warning(f"补货表 B组失败: {e}")
 
     if not frames:
         logger.warning("未提供补货备货表或无法读取，成本回填将跳过")
@@ -462,6 +421,7 @@ def fill_purchase_costs(
         report_rows.append({
             "行号": idx, "货品编码": sku, "采购方式": df.at[idx, method_col],
             "商品ID": df.at[idx, "style_id"] if "style_id" in df.columns else "",
+            "来源": df.at[idx, "_source_file"] if "_source_file" in df.columns else "",
             "采购日期": pdate, "状态": status, "回填单价": avg,
         })
 
@@ -515,7 +475,9 @@ def load_data(input_path: str, exclude_keywords: Optional[List[str]] = None) -> 
         exclude_keywords = ["备货", "补货", "補貨"]  # 排除补货表，避免混入采购数据
     path = Path(input_path)
     if path.is_file():
-        frames = [read_file(str(path))]
+        df = read_file(str(path))
+        df["_source_file"] = path.name
+        frames = [df]
     elif path.is_dir():
         files = []
         for pat in ["*.xlsx", "*.xls", "*.csv"]:
@@ -530,7 +492,11 @@ def load_data(input_path: str, exclude_keywords: Optional[List[str]] = None) -> 
             raise FileNotFoundError(f"目录 {input_path} 下未找到采购表文件")
         for f in files:
             logger.info(f"  采购表: {Path(f).name}")
-        frames = [read_file(f) for f in files]
+        frames = []
+        for f in files:
+            df = read_file(f)
+            df["_source_file"] = Path(f).name
+            frames.append(df)
     else:
         raise FileNotFoundError(f"路径不存在: {input_path}")
     df = pd.concat(frames, ignore_index=True)
@@ -617,10 +583,6 @@ def clean_data(
     if missing:
         raise KeyError(f"缺少必要字段: {missing}。实际字段: {list(df.columns)}")
     df = df.rename(columns=COLUMN_MAP).copy()
-
-    # ── 采购方式空值填充 ──
-    df["purchase_method"] = df["purchase_method"].fillna("未知").astype(str).str.strip()
-    df.loc[df["purchase_method"].isin(["", "nan", "None"]), "purchase_method"] = "未知"
 
     # ── 过滤空店铺 ──
     before = len(df)
@@ -713,7 +675,6 @@ def aggregate_styles(df: pd.DataFrame) -> pd.DataFrame:
     agg = df.groupby(["store", "style_id", "year_month"]).agg(
         gmv=("sale_price", "sum"), qty=("qty", "sum"),
         profit=("profit", "sum"), cost=("cost_price", "sum"),
-        purchase_method=("purchase_method", lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else "未知"),
     ).reset_index()
     agg["margin_rate"] = agg.apply(
         lambda r: round(r["profit"] / r["gmv"] * 100, 2) if r["gmv"] > 0 else 0, axis=1
@@ -763,7 +724,6 @@ def compute_dashboard_data(df, styles_df, store_configs):
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "stores": sorted(df["store"].unique().tolist()),
             "months": sorted(df["year_month"].unique().tolist()),
-            "purchase_methods": sorted([str(m) for m in df["purchase_method"].dropna().unique().tolist()]),
         },
         "config": {
             "store_configs": {c.store_name: c.target_margin for c in store_configs},
@@ -781,7 +741,6 @@ def compute_dashboard_data(df, styles_df, store_configs):
             "profit": round(float(r["profit"]), 2), "margin_rate": round(float(r["margin_rate"]), 2),
             "qty_share": round(float(r["qty_share"]), 2), "category": r["category"],
             "target_margin": round(float(r["target_margin"]), 2),
-            "purchase_method": str(r.get("purchase_method", "未知")),
         })
 
     def summarize(subset):
@@ -789,8 +748,7 @@ def compute_dashboard_data(df, styles_df, store_configs):
         total_qty = int(subset["qty"].sum())
         total_profit = round(float(subset["profit"].sum()), 2)
         total_margin = round(total_profit / total_gmv * 100, 2) if total_gmv > 0 else 0
-        kpi = {"gmv": total_gmv, "qty": total_qty, "total_profit": total_profit,
-               "style_count": int(subset["style_id"].nunique()),
+        kpi = {"gmv": total_gmv, "qty": total_qty, "style_count": int(subset["style_id"].nunique()),
                "margin_rate": total_margin, "margin_warning": bool(total_margin < GLOBAL_MARGIN_WARNING)}
         categories = {}
         for cat in ["利润款", "流量款", "基础款", "调整款"]:
@@ -832,10 +790,10 @@ def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd
         logger.info(f"回填报告已保存: {report_dir / '回填报告.xlsx'}")
 
     # 待人工处理清单（始终生成）
-    unmatched = pd.DataFrame(columns=["货品编码", "采购方式", "商品ID"])
+    unmatched = pd.DataFrame(columns=["货品编码", "采购方式", "商品ID", "来源"])
     if not fill_report.empty:
         unmatched = fill_report[fill_report["状态"] == "未匹配"][
-            ["货品编码", "采购方式", "商品ID"]
+            ["货品编码", "采购方式", "商品ID", "来源"]
         ].drop_duplicates()
 
     missing_price = pd.DataFrame(columns=["来源", "采购日期", "货品编码", "数量"])
@@ -848,6 +806,40 @@ def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd
         unmatched.to_excel(w, sheet_name="未匹配货品编码", index=False)
         missing_price.to_excel(w, sheet_name="补货表漏填采购价", index=False)
     logger.info(f"待人工处理清单已保存: {report_dir / '待人工处理清单.xlsx'}")
+
+
+def _save_purchase_detail(clean_df: pd.DataFrame, report_dir: Path):
+    """输出整理完的采购明细表"""
+    if clean_df.empty:
+        return
+
+    detail = clean_df[[
+        "full_date", "order_id", "qty", "sale_price_twd", "store",
+        "sku_code", "style_id", "purchase_method", "cost_price",
+        "sale_price", "profit",
+    ]].copy()
+
+    detail.columns = [
+        "采购日期", "订单号", "商品数量", "销售单价(台币)", "店铺名",
+        "货品编码", "商品ID", "采购方式", "采购单价",
+        "销售单价(人民币)", "毛利",
+    ]
+    detail["采购金额"] = (detail["采购单价"] * detail["商品数量"]).round(2)
+    detail["毛利率"] = detail.apply(
+        lambda r: round(r["毛利"] / r["销售单价(人民币)"] * 100, 2)
+        if r["销售单价(人民币)"] > 0 else 0, axis=1
+    )
+
+    # 重新排列列顺序
+    detail = detail[[
+        "采购日期", "订单号", "商品数量", "销售单价(台币)", "店铺名",
+        "货品编码", "商品ID", "采购方式", "采购单价", "采购金额",
+        "毛利", "毛利率",
+    ]]
+
+    out_path = report_dir / "采购明细表.xlsx"
+    detail.to_excel(str(out_path), index=False)
+    logger.info(f"采购明细表已保存: {out_path} ({len(detail)} 行)")
 
 
 # ============================================================
@@ -877,7 +869,7 @@ def _auto_discover_replen(search_dir: Path) -> Tuple[Optional[str], Optional[str
             continue
         for f in d.glob("*.xlsx"):
             name = f.name
-            if "备货" in name or "補貨" in name or "采购" in name:
+            if "备货" in name or "補貨" in name:
                 if "A组" in name and not replen_a:
                     replen_a = str(f)
                     logger.info(f"自动发现A组补货表: {f}")
@@ -957,6 +949,9 @@ def run_pipeline(
     report_dir = Path(output_path).parent
     _save_reports(report_dir, fill_report, replen_master)
 
+    # Step 8: 输出采购明细表
+    _save_purchase_detail(clean_df, report_dir)
+
     # 摘要
     s = dashboard_data["summary"]["全部"]
     logger.info("-" * 40)
@@ -993,7 +988,10 @@ def main():
 
     configs = DEFAULT_STORE_CONFIGS
     if target_margin is not None:
+        global GLOBAL_MARGIN_WARNING
+        GLOBAL_MARGIN_WARNING = target_margin
         configs = [StoreConfig(c.store_name, target_margin) for c in configs]
+        logger.info(f"目标毛利率: {target_margin}%")
 
     run_pipeline(
         str(input_path), str(output_path),
