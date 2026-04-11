@@ -93,7 +93,7 @@ body {
 .main { padding: 24px 32px 48px; max-width: 1440px; margin: 0 auto; }
 
 /* ── KPI Cards ── */
-.kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 28px; }
+.kpi-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-bottom: 28px; }
 .kpi-card {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 20px 22px;
@@ -107,8 +107,9 @@ body {
 }
 .kpi-card:nth-child(1)::before { background: linear-gradient(90deg, var(--accent), var(--accent2)); }
 .kpi-card:nth-child(2)::before { background: linear-gradient(90deg, var(--profit-color), #2dd4bf); }
-.kpi-card:nth-child(3)::before { background: linear-gradient(90deg, var(--traffic-color), #fb923c); }
-.kpi-card:nth-child(4)::before { background: linear-gradient(90deg, var(--accent2), #e879f9); }
+.kpi-card:nth-child(3)::before { background: linear-gradient(90deg, #34d399, #10b981); }
+.kpi-card:nth-child(4)::before { background: linear-gradient(90deg, var(--traffic-color), #fb923c); }
+.kpi-card:nth-child(5)::before { background: linear-gradient(90deg, var(--accent2), #e879f9); }
 .kpi-card.warning { border-color: var(--warn); background: var(--warn-bg); }
 .kpi-card.warning::before { background: var(--warn) !important; }
 .kpi-label { font-size: 12px; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
@@ -190,8 +191,14 @@ body {
 .error-box code { background: var(--surface); padding: 2px 8px; border-radius: 4px; font-size: 12px; color: var(--accent); }
 
 /* ── Responsive ── */
-@media (max-width: 1200px) { .kpi-row, .cat-grid, .rank-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 640px)  { .kpi-row, .cat-grid, .rank-grid { grid-template-columns: 1fr; } .main { padding: 16px; } .header { padding: 16px; } }
+.dl-btn {
+  background: var(--surface); color: var(--accent); border: 1px solid var(--border);
+  padding: 10px 20px; border-radius: 8px; font-size: 13px; font-family: inherit;
+  cursor: pointer; font-weight: 600; transition: all .2s;
+}
+.dl-btn:hover { border-color: var(--accent); background: var(--surface2); }
+@media (max-width: 1200px) { .kpi-row, .cat-grid, .rank-grid, #methodGrid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 640px)  { .kpi-row, .cat-grid, .rank-grid, #methodGrid { grid-template-columns: 1fr; } .main { padding: 16px; } .header { padding: 16px; } }
 </style>
 </head>
 <body>
@@ -224,6 +231,10 @@ body {
         <option value="调整款">调整款</option>
       </select>
     </div>
+    <div class="filter-group">
+      <label>采购方式</label>
+      <select id="filterMethod"><option value="all">全部方式</option></select>
+    </div>
   </div>
 </div>
 
@@ -233,6 +244,14 @@ body {
   <div class="cat-grid" id="catGrid"></div>
   <div class="section-title">款式排名看板（Top 20）</div>
   <div class="rank-grid" id="rankGrid"></div>
+
+  <div class="section-title" style="margin-top:32px">采购方式分析</div>
+  <div class="cat-grid" id="methodGrid"></div>
+
+  <div style="display:flex;gap:12px;margin-top:32px;flex-wrap:wrap">
+    <button class="dl-btn" onclick="downloadFile('待人工处理清单.xlsx')">⬇ 待人工处理清单</button>
+    <button class="dl-btn" onclick="downloadFile('回填报告.xlsx')">⬇ 回填报告</button>
+  </div>
 </div>
 
 <script>
@@ -310,12 +329,22 @@ function initApp() {
     monthSelect.appendChild(o);
   });
 
+  const methodSelect = document.getElementById('filterMethod');
+  if (DB.meta.purchase_methods) {
+    DB.meta.purchase_methods.forEach(m => {
+      const o = document.createElement('option');
+      o.value = m; o.textContent = m;
+      methodSelect.appendChild(o);
+    });
+  }
+
   document.getElementById('dataDate').textContent = '数据截止日：' + DB.meta.data_cutoff;
 
   // 绑定事件
   storeSelect.addEventListener('change', render);
   monthSelect.addEventListener('change', render);
   document.getElementById('filterCat').addEventListener('change', render);
+  methodSelect.addEventListener('change', render);
 
   // 首次渲染
   render();
@@ -327,8 +356,17 @@ function initApp() {
 
 // ── 获取当前筛选条件下的数据 ──
 function getFilteredData() {
-  const store = document.getElementById('filterStore').value;
-  const month = document.getElementById('filterMonth').value;
+  const store  = document.getElementById('filterStore').value;
+  const month  = document.getElementById('filterMonth').value;
+  const method = document.getElementById('filterMethod').value;
+
+  // 如有采购方式筛选，始终从 raw_styles 实时计算
+  if (method !== 'all') {
+    let styles = DB.raw_styles.filter(s => s.purchase_method === method);
+    if (store !== 'all') styles = styles.filter(s => s.store === store);
+    if (month !== 'all') styles = styles.filter(s => s.year_month === month);
+    return computeSummary(styles);
+  }
 
   // 优先使用预计算的 summary（性能更好）
   if (store === 'all' && month === 'all') {
@@ -360,6 +398,7 @@ function computeSummary(styles) {
   const kpi = {
     gmv: +totalGMV.toFixed(2),
     qty: +totalQty.toFixed(1),
+    total_profit: +totalProfit.toFixed(2),
     style_count: styleIDs.size,
     margin_rate: totalMargin,
     margin_warning: totalMargin < DB.config.global_margin_warning,
@@ -392,14 +431,16 @@ function computeSummary(styles) {
 
 // ── 获取当前筛选下的款式列表（排名用） ──
 function getFilteredStyles() {
-  const store = document.getElementById('filterStore').value;
-  const month = document.getElementById('filterMonth').value;
-  const cat   = document.getElementById('filterCat').value;
+  const store  = document.getElementById('filterStore').value;
+  const month  = document.getElementById('filterMonth').value;
+  const cat    = document.getElementById('filterCat').value;
+  const method = document.getElementById('filterMethod').value;
 
   let styles = DB.raw_styles;
-  if (store !== 'all') styles = styles.filter(s => s.store === store);
-  if (month !== 'all') styles = styles.filter(s => s.year_month === month);
-  if (cat   !== 'all') styles = styles.filter(s => s.category === cat);
+  if (store  !== 'all') styles = styles.filter(s => s.store === store);
+  if (month  !== 'all') styles = styles.filter(s => s.year_month === month);
+  if (cat    !== 'all') styles = styles.filter(s => s.category === cat);
+  if (method !== 'all') styles = styles.filter(s => s.purchase_method === method);
   return styles;
 }
 
@@ -426,6 +467,10 @@ function render() {
     <div class="kpi-card">
       <div class="kpi-label">总销售量</div>
       <div class="kpi-value">${fmtNum(kpi.qty, 0)}<span class="kpi-unit">件</span></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">总毛利润</div>
+      <div class="kpi-value ${(kpi.total_profit || 0) < 0 ? 'margin-warn' : ''}">¥${fmtNum(kpi.total_profit || 0)}</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-label">款式数</div>
@@ -497,6 +542,46 @@ function render() {
       </div>`;
   });
   document.getElementById('rankGrid').innerHTML = rankHTML;
+
+  // ── 采购方式分析 ──
+  const METHOD_COLORS = ['#38bdf8','#34d399','#fbbf24','#a78bfa','#f87171','#fb923c','#e879f9','#2dd4bf'];
+  const methods = {};
+  styles.forEach(s => {
+    const m = s.purchase_method || '未知';
+    if (!methods[m]) methods[m] = { gmv:0, qty:0, profit:0, count:new Set() };
+    methods[m].gmv += s.gmv;
+    methods[m].qty += s.qty;
+    methods[m].profit += s.profit;
+    methods[m].count.add(s.style_id);
+  });
+  const totalMethodGMV = Object.values(methods).reduce((s,v) => s + v.gmv, 0);
+  const totalMethodQty = Object.values(methods).reduce((s,v) => s + v.qty, 0);
+  let methodHTML = '';
+  Object.keys(methods).sort().forEach((m, i) => {
+    const v = methods[m];
+    const margin = v.gmv > 0 ? (v.profit / v.gmv * 100) : 0;
+    const gmvShare = totalMethodGMV > 0 ? (v.gmv / totalMethodGMV * 100) : 0;
+    const qtyShare = totalMethodQty > 0 ? (v.qty / totalMethodQty * 100) : 0;
+    methodHTML += `
+      <div class="cat-card">
+        <div class="cat-header">
+          <div class="cat-dot" style="background:${METHOD_COLORS[i % METHOD_COLORS.length]}"></div>
+          <div class="cat-name">${m}</div>
+        </div>
+        <div class="cat-metrics">
+          <div class="cat-metric"><span class="cat-metric-label">款式数</span><span class="cat-metric-value">${v.count.size}</span></div>
+          <div class="cat-metric"><span class="cat-metric-label">GMV</span><span class="cat-metric-value">¥${fmtNum(v.gmv)}<span class="cat-metric-sub">(${gmvShare.toFixed(1)}%)</span></span></div>
+          <div class="cat-metric"><span class="cat-metric-label">销售量</span><span class="cat-metric-value">${fmtNum(v.qty, 0)}<span class="cat-metric-sub">(${qtyShare.toFixed(1)}%)</span></span></div>
+          <div class="cat-metric"><span class="cat-metric-label">平均毛利率</span><span class="cat-metric-value ${margin >= 35 ? 'margin-good' : 'margin-warn'}">${margin.toFixed(1)}%</span></div>
+        </div>
+      </div>`;
+  });
+  document.getElementById('methodGrid').innerHTML = methodHTML || '<div style="color:var(--text-muted);font-size:13px;padding:12px">暂无采购方式数据</div>';
+}
+
+// ── 下载文件 ──
+function downloadFile(filename) {
+  window.open('/download/' + encodeURIComponent(filename), '_blank');
 }
 
 // ── 排名列表 ──
