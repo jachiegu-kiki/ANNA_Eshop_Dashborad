@@ -672,7 +672,7 @@ def clean_data(
 # ============================================================
 
 def aggregate_styles(df: pd.DataFrame) -> pd.DataFrame:
-    agg = df.groupby(["store", "style_id", "year_month"]).agg(
+    agg = df.groupby(["store", "style_id", "year_month", "purchase_method"]).agg(
         gmv=("sale_price", "sum"), qty=("qty", "sum"),
         profit=("profit", "sum"), cost=("cost_price", "sum"),
     ).reset_index()
@@ -724,6 +724,7 @@ def compute_dashboard_data(df, styles_df, store_configs):
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "stores": sorted(df["store"].unique().tolist()),
             "months": sorted(df["year_month"].unique().tolist()),
+            "purchase_methods": sorted([str(m) for m in df["purchase_method"].dropna().unique() if str(m).strip()]),
         },
         "config": {
             "store_configs": {c.store_name: c.target_margin for c in store_configs},
@@ -737,6 +738,7 @@ def compute_dashboard_data(df, styles_df, store_configs):
     for _, r in styles_df.iterrows():
         result["raw_styles"].append({
             "store": r["store"], "style_id": r["style_id"], "year_month": r["year_month"],
+            "purchase_method": str(r.get("purchase_method", "")),
             "gmv": round(float(r["gmv"]), 2), "qty": int(r["qty"]),
             "profit": round(float(r["profit"]), 2), "margin_rate": round(float(r["margin_rate"]), 2),
             "qty_share": round(float(r["qty_share"]), 2), "category": r["category"],
