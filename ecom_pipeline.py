@@ -266,7 +266,7 @@ def _parse_excel_date(val):
 
 def _parse_replen_sheet(filepath, sheet_name, sku_col, date_col) -> pd.DataFrame:
     """解析单个补货 sheet，返回统一格式"""
-    df = pd.read_excel(filepath, sheet_name=sheet_name, header=2)
+    df = pd.read_excel(filepath, sheet_name=sheet_name, header=2, engine="openpyxl")
     required = [sku_col, date_col, REPLEN_COMMON_COLS["price_col"],
                 REPLEN_COMMON_COLS["qty_col"], REPLEN_COMMON_COLS["amount_col"]]
     missing = [c for c in required if c not in df.columns]
