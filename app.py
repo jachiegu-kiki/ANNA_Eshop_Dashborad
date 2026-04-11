@@ -55,7 +55,7 @@ CACHE_DIR     = BASE_DIR / "cache"
 ARCHIVE_DIR   = BASE_DIR / "archive"
 LOG_DIR       = BASE_DIR / "logs"
 CONFIG_FILE   = BASE_DIR / ".env"
-PIPELINE_FILE = BASE_DIR / "ecom_pipeline.py"
+PIPELINE_FILE = BASE_DIR / "ecom_pipeline_v3.py"
 
 for d in [UPLOAD_DIR, DATA_DIR, OUTPUT_DIR, CACHE_DIR, ARCHIVE_DIR, LOG_DIR]:
     d.mkdir(parents=True, exist_ok=True)
@@ -83,6 +83,7 @@ def load_config() -> dict:
         "VIEW_PASSWORD": "",
         "PORT": "5000",
         "HOST": "0.0.0.0",
+        "TARGET_MARGIN": "35",
     }
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -306,12 +307,60 @@ def health():
     })
 
 
+@app.route("/api/target-margin", methods=["GET", "POST"])
+def target_margin_api():
+    """获取或设置目标毛利率，并持久化到 .env 配置"""
+    if not check_view_auth():
+        abort(403)
+
+    if request.method == "GET":
+        return jsonify({"target_margin": float(CONFIG.get("TARGET_MARGIN", 35))})
+
+    # POST: 更新目标毛利率
+    data = request.get_json(silent=True) or {}
+    new_margin = data.get("target_margin")
+    if new_margin is None:
+        return jsonify({"success": False, "error": "缺少 target_margin"}), 400
+    try:
+        new_margin = float(new_margin)
+        if not (0 <= new_margin <= 100):
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "无效的毛利率值"}), 400
+
+    # 写入 CONFIG 并持久化
+    CONFIG["TARGET_MARGIN"] = str(new_margin)
+    _save_config()
+    logger.info(f"目标毛利率已更新为 {new_margin}%")
+
+    # 如果有数据，自动重跑管道
+    pipeline_result = {"skipped": True}
+    data_files = [f for f in UPLOAD_DIR.iterdir()
+                  if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS]
+    if data_files:
+        pipeline_result = _run_pipeline()
+
+    return jsonify({
+        "success": True,
+        "target_margin": new_margin,
+        "pipeline": pipeline_result,
+    })
+
+
+def _save_config():
+    """将当前 CONFIG 写回 .env 文件"""
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        f.write("# 电商看板 安全配置文件\n")
+        for key, val in CONFIG.items():
+            f.write(f"{key}={val}\n")
+
+
 @app.route("/download/<filename>")
 def download_report(filename):
     """下载回填报告 / 待人工处理清单等 output 目录下的文件"""
     if not check_view_auth():
         abort(403)
-    SAFE_FILES = {"待人工处理清单.xlsx", "回填报告.xlsx"}
+    SAFE_FILES = {"待人工处理清单.xlsx", "回填报告.xlsx", "采购明细表.xlsx"}
     if filename not in SAFE_FILES:
         abort(404)
     filepath = OUTPUT_DIR / filename
@@ -423,10 +472,12 @@ def _run_pipeline() -> dict:
         return {"success": False, "error": "无数据文件可处理"}
 
     output_file = OUTPUT_DIR / "dashboard_data.json"
+    target_margin = CONFIG.get("TARGET_MARGIN", "35")
     cmd = [
         sys.executable, str(PIPELINE_FILE),
         "--input", str(UPLOAD_DIR),
         "--output", str(output_file),
+        "--target-margin", str(target_margin),
     ]
 
     try:
