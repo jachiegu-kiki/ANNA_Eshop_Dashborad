@@ -242,6 +242,11 @@ A_REPLEN_SHEET_CONFIG = {
     "4月":        {"sku_col": "货品编码",       "date_col": "日期"},
 }
 B_REPLEN_SHEET_CONFIG = {"sheet_name": "補貨表", "sku_col": "货品编码", "date_col": "采购日期"}
+# B组备选配置：适配不同版本的B组采购表
+B_REPLEN_FALLBACK_CONFIGS = [
+    {"sheet_name": None, "header_row": 1, "sku_col": "货品编码", "date_col": "采购日期",
+     "price_col": "实际采购价", "qty_col": "商品数量", "amount_col": "实付金额"},
+]
 REPLEN_COMMON_COLS = {"price_col": "采购价", "qty_col": "实际采购", "amount_col": "合计金额"}
 
 
@@ -264,9 +269,9 @@ def _parse_excel_date(val):
     return pd.to_datetime(val, errors="coerce")
 
 
-def _parse_replen_sheet(filepath, sheet_name, sku_col, date_col) -> pd.DataFrame:
+def _parse_replen_sheet(filepath, sheet_name, sku_col, date_col, header_row=2) -> pd.DataFrame:
     """解析单个补货 sheet，返回统一格式"""
-    df = pd.read_excel(filepath, sheet_name=sheet_name, header=2)
+    df = pd.read_excel(filepath, sheet_name=sheet_name, header=header_row, engine="openpyxl")
     required = [sku_col, date_col, REPLEN_COMMON_COLS["price_col"],
                 REPLEN_COMMON_COLS["qty_col"], REPLEN_COMMON_COLS["amount_col"]]
     missing = [c for c in required if c not in df.columns]
@@ -306,6 +311,8 @@ def build_replenishment_master(
                 logger.warning(f"补货表 A组[{sheet_name}] 失败: {e}")
 
     if b_filepath and Path(b_filepath).exists():
+        b_loaded = False
+        # 尝试主配置
         cfg = B_REPLEN_SHEET_CONFIG
         try:
             sub = _parse_replen_sheet(b_filepath, cfg["sheet_name"], cfg["sku_col"], cfg["date_col"])
@@ -313,8 +320,42 @@ def build_replenishment_master(
             if len(sub) > 0:
                 frames.append(sub)
                 logger.info(f"补货表 B组: {len(sub)} 行")
+                b_loaded = True
         except Exception as e:
-            logger.warning(f"补货表 B组失败: {e}")
+            logger.debug(f"补货表 B组主配置失败: {e}，尝试备选配置")
+
+        # 主配置失败 → 遍历所有sheet用备选列映射
+        if not b_loaded:
+            xl_sheets = pd.ExcelFile(b_filepath, engine="openpyxl").sheet_names
+            for fb in B_REPLEN_FALLBACK_CONFIGS:
+                target_sheets = [fb["sheet_name"]] if fb["sheet_name"] else xl_sheets
+                for sn in target_sheets:
+                    try:
+                        hr = fb.get("header_row", 2)
+                        df_b = pd.read_excel(b_filepath, sheet_name=sn, header=hr, engine="openpyxl")
+                        p_col = fb.get("price_col", REPLEN_COMMON_COLS["price_col"])
+                        q_col = fb.get("qty_col", REPLEN_COMMON_COLS["qty_col"])
+                        a_col = fb.get("amount_col", REPLEN_COMMON_COLS["amount_col"])
+                        required = [fb["sku_col"], fb["date_col"], p_col, q_col]
+                        missing = [c for c in required if c not in df_b.columns]
+                        if missing:
+                            continue
+                        sub = pd.DataFrame({
+                            "采购日期": pd.to_datetime(df_b[fb["date_col"]], errors="coerce"),
+                            "货品编码": df_b[fb["sku_col"]].apply(_norm_sku),
+                            "采购单价": pd.to_numeric(df_b[p_col], errors="coerce"),
+                            "数量":     pd.to_numeric(df_b[q_col], errors="coerce"),
+                            "合计金额": pd.to_numeric(df_b.get(a_col, pd.Series(dtype=float)), errors="coerce"),
+                            "来源":     f"B组-{sn}",
+                        })
+                        if len(sub) > 0:
+                            frames.append(sub)
+                            logger.info(f"补货表 B组[{sn}]: {len(sub)} 行 (备选配置)")
+                            b_loaded = True
+                    except Exception as e:
+                        logger.debug(f"补货表 B组[{sn}] 备选失败: {e}")
+            if not b_loaded:
+                logger.warning("补货表 B组: 所有配置均失败")
 
     if not frames:
         logger.warning("未提供补货备货表或无法读取，成本回填将跳过")
@@ -828,7 +869,7 @@ def _auto_discover_replen(search_dir: Path) -> Tuple[Optional[str], Optional[str
             continue
         for f in d.glob("*.xlsx"):
             name = f.name
-            if "备货" in name or "補貨" in name:
+            if "备货" in name or "補貨" in name or "采购" in name:
                 if "A组" in name and not replen_a:
                     replen_a = str(f)
                     logger.info(f"自动发现A组补货表: {f}")
