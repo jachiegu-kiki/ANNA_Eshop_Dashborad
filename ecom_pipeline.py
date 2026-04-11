@@ -585,6 +585,10 @@ def clean_data(
     df = df.rename(columns=COLUMN_MAP).copy()
 
     # ── 过滤空店铺 ──
+    # ── 商品ID / 订单号 统一字符串化 ──
+    df["order_id"] = df["order_id"].apply(lambda x: _norm_sku(x) if pd.notna(x) else "")
+    df["style_id"] = df["style_id"].apply(lambda x: _norm_sku(x) if pd.notna(x) else "")
+
     before = len(df)
     df = df[df["store"].notna() & (df["store"].str.strip() != "")]
     logger.info(f"过滤空店铺: {before} → {len(df)} 行")
@@ -644,10 +648,6 @@ def clean_data(
     )
     df["year_month"] = df.apply(
         lambda r: f"{int(r['year'])}-{int(r['month']):02d}", axis=1
-    )
-
-    df["style_id"] = df["style_id"].apply(
-        lambda x: str(x) if pd.notna(x) and x == x else ""
     )
 
     # ── 汇率 ──
@@ -730,6 +730,7 @@ def compute_dashboard_data(df, styles_df, store_configs):
             "store_configs": {c.store_name: c.target_margin for c in store_configs},
             "category_thresholds": CATEGORY_MARGIN_THRESHOLDS,
             "global_margin_warning": GLOBAL_MARGIN_WARNING,
+            "traffic_qty_share_threshold": TRAFFIC_QTY_SHARE_THRESHOLD,
         },
         "raw_styles": [],
         "summary": {},
@@ -750,7 +751,8 @@ def compute_dashboard_data(df, styles_df, store_configs):
         total_qty = int(subset["qty"].sum())
         total_profit = round(float(subset["profit"].sum()), 2)
         total_margin = round(total_profit / total_gmv * 100, 2) if total_gmv > 0 else 0
-        kpi = {"gmv": total_gmv, "qty": total_qty, "style_count": int(subset["style_id"].nunique()),
+        kpi = {"gmv": total_gmv, "qty": total_qty, "total_profit": total_profit,
+               "style_count": int(subset["style_id"].nunique()),
                "margin_rate": total_margin, "margin_warning": bool(total_margin < GLOBAL_MARGIN_WARNING)}
         categories = {}
         for cat in ["利润款", "流量款", "基础款", "调整款"]:
@@ -834,7 +836,7 @@ def _save_purchase_detail(clean_df: pd.DataFrame, report_dir: Path):
 
     # 重新排列列顺序
     detail = detail[[
-        "采购日期", "订单号", "商品数量", "销售单价(台币)", "店铺名",
+        "采购日期", "订单号", "商品数量", "销售单价(台币)", "销售单价(人民币)", "店铺名",
         "货品编码", "商品ID", "采购方式", "采购单价", "采购金额",
         "毛利", "毛利率",
     ]]
