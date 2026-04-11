@@ -469,7 +469,9 @@ def read_file(filepath: str) -> pd.DataFrame:
         raise ValueError(f"不支持的格式: {ext}")
 
 
-def load_data(input_path: str) -> pd.DataFrame:
+def load_data(input_path: str, exclude_keywords: Optional[List[str]] = None) -> pd.DataFrame:
+    if exclude_keywords is None:
+        exclude_keywords = ["备货", "补货", "補貨"]  # 排除补货表，避免混入采购数据
     path = Path(input_path)
     if path.is_file():
         frames = [read_file(str(path))]
@@ -478,8 +480,15 @@ def load_data(input_path: str) -> pd.DataFrame:
         for pat in ["*.xlsx", "*.xls", "*.csv"]:
             files.extend(glob.glob(str(path / pat)))
         files = sorted(set(files))
+        # 排除补货备货表
+        before = len(files)
+        files = [f for f in files if not any(kw in Path(f).name for kw in exclude_keywords)]
+        if before > len(files):
+            logger.info(f"已排除 {before - len(files)} 个补货备货文件，避免混入采购数据")
         if not files:
-            raise FileNotFoundError(f"目录 {input_path} 下未找到数据文件")
+            raise FileNotFoundError(f"目录 {input_path} 下未找到采购表文件")
+        for f in files:
+            logger.info(f"  采购表: {Path(f).name}")
         frames = [read_file(f) for f in files]
     else:
         raise FileNotFoundError(f"路径不存在: {input_path}")
@@ -801,6 +810,36 @@ DEFAULT_INPUT_PATH = SCRIPT_DIR / "uploads_raw"
 DEFAULT_OUTPUT_PATH = SCRIPT_DIR / "output" / "dashboard_data.json"
 DEFAULT_TARGET_MARGIN = 35.0
 
+# ── 补货备货表默认路径（相对于脚本目录） ──
+DEFAULT_REPLEN_A_PATH = SCRIPT_DIR / "uploads_raw" / "A组备货补货申请表.xlsx"
+DEFAULT_REPLEN_B_PATH = SCRIPT_DIR / "uploads_raw" / "B组补货申请表.xlsx"
+
+
+def _auto_discover_replen(search_dir: Path) -> Tuple[Optional[str], Optional[str]]:
+    """
+    在指定目录及其父目录中自动查找补货备货申请表。
+    匹配规则：文件名包含关键词。
+    """
+    replen_a, replen_b = None, None
+    search_dirs = [search_dir, search_dir.parent, SCRIPT_DIR, SCRIPT_DIR / "uploads_raw"]
+
+    for d in search_dirs:
+        if not d.exists():
+            continue
+        for f in d.glob("*.xlsx"):
+            name = f.name
+            if "备货" in name or "補貨" in name:
+                if "A组" in name and not replen_a:
+                    replen_a = str(f)
+                    logger.info(f"自动发现A组补货表: {f}")
+                elif "B组" in name and not replen_b:
+                    replen_b = str(f)
+                    logger.info(f"自动发现B组补货表: {f}")
+        if replen_a and replen_b:
+            break
+
+    return replen_a, replen_b
+
 
 @dataclass
 class PipelineResult:
@@ -829,6 +868,20 @@ def run_pipeline(
     logger.info("=" * 60)
 
     # Step 1: 构建统一补货明细表
+    # 如果没有指定路径，先尝试默认路径，再自动扫描
+    if not replen_a_path and DEFAULT_REPLEN_A_PATH.exists():
+        replen_a_path = str(DEFAULT_REPLEN_A_PATH)
+    if not replen_b_path and DEFAULT_REPLEN_B_PATH.exists():
+        replen_b_path = str(DEFAULT_REPLEN_B_PATH)
+    if not replen_a_path or not replen_b_path:
+        auto_a, auto_b = _auto_discover_replen(Path(input_path))
+        replen_a_path = replen_a_path or auto_a
+        replen_b_path = replen_b_path or auto_b
+    if not replen_a_path and not replen_b_path:
+        logger.warning("⚠️ 未找到补货备货申请表，成本回填将跳过。"
+                       "请通过 --replen-a / --replen-b 指定路径，"
+                       "或将文件放在 uploads_raw 目录下。")
+
     replen_master = build_replenishment_master(replen_a_path, replen_b_path)
 
     # Step 2: 读取采购表
