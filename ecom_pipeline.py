@@ -647,7 +647,7 @@ def clean_data(
     )
 
     df["style_id"] = df["style_id"].apply(
-        lambda x: str(int(x)) if pd.notna(x) and x == x else ""
+        lambda x: str(x) if pd.notna(x) and x == x else ""
     )
 
     # ── 汇率 ──
