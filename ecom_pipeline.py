@@ -618,6 +618,10 @@ def clean_data(
         raise KeyError(f"缺少必要字段: {missing}。实际字段: {list(df.columns)}")
     df = df.rename(columns=COLUMN_MAP).copy()
 
+    # ── 采购方式空值填充 ──
+    df["purchase_method"] = df["purchase_method"].fillna("未知").astype(str).str.strip()
+    df.loc[df["purchase_method"].isin(["", "nan", "None"]), "purchase_method"] = "未知"
+
     # ── 过滤空店铺 ──
     before = len(df)
     df = df[df["store"].notna() & (df["store"].str.strip() != "")]
@@ -709,6 +713,7 @@ def aggregate_styles(df: pd.DataFrame) -> pd.DataFrame:
     agg = df.groupby(["store", "style_id", "year_month"]).agg(
         gmv=("sale_price", "sum"), qty=("qty", "sum"),
         profit=("profit", "sum"), cost=("cost_price", "sum"),
+        purchase_method=("purchase_method", lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else "未知"),
     ).reset_index()
     agg["margin_rate"] = agg.apply(
         lambda r: round(r["profit"] / r["gmv"] * 100, 2) if r["gmv"] > 0 else 0, axis=1
@@ -758,6 +763,7 @@ def compute_dashboard_data(df, styles_df, store_configs):
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "stores": sorted(df["store"].unique().tolist()),
             "months": sorted(df["year_month"].unique().tolist()),
+            "purchase_methods": sorted([str(m) for m in df["purchase_method"].dropna().unique().tolist()]),
         },
         "config": {
             "store_configs": {c.store_name: c.target_margin for c in store_configs},
@@ -775,6 +781,7 @@ def compute_dashboard_data(df, styles_df, store_configs):
             "profit": round(float(r["profit"]), 2), "margin_rate": round(float(r["margin_rate"]), 2),
             "qty_share": round(float(r["qty_share"]), 2), "category": r["category"],
             "target_margin": round(float(r["target_margin"]), 2),
+            "purchase_method": str(r.get("purchase_method", "未知")),
         })
 
     def summarize(subset):
@@ -782,7 +789,8 @@ def compute_dashboard_data(df, styles_df, store_configs):
         total_qty = int(subset["qty"].sum())
         total_profit = round(float(subset["profit"].sum()), 2)
         total_margin = round(total_profit / total_gmv * 100, 2) if total_gmv > 0 else 0
-        kpi = {"gmv": total_gmv, "qty": total_qty, "style_count": int(subset["style_id"].nunique()),
+        kpi = {"gmv": total_gmv, "qty": total_qty, "total_profit": total_profit,
+               "style_count": int(subset["style_id"].nunique()),
                "margin_rate": total_margin, "margin_warning": bool(total_margin < GLOBAL_MARGIN_WARNING)}
         categories = {}
         for cat in ["利润款", "流量款", "基础款", "调整款"]:

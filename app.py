@@ -306,6 +306,20 @@ def health():
     })
 
 
+@app.route("/download/<filename>")
+def download_report(filename):
+    """下载回填报告 / 待人工处理清单等 output 目录下的文件"""
+    if not check_view_auth():
+        abort(403)
+    SAFE_FILES = {"待人工处理清单.xlsx", "回填报告.xlsx"}
+    if filename not in SAFE_FILES:
+        abort(404)
+    filepath = OUTPUT_DIR / filename
+    if not filepath.exists():
+        abort(404)
+    return send_from_directory(str(OUTPUT_DIR), filename, as_attachment=True)
+
+
 # ============================================================
 # 核心：文件上传 → Excel转CSV → 运行管道
 # ============================================================
