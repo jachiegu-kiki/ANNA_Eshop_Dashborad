@@ -70,6 +70,9 @@ class StoreConfig:
 DEFAULT_STORE_CONFIGS = [
     StoreConfig("23号店【VFU瑜珈服】", 35.0),
     StoreConfig("19号店-【健身女孩瑜珈服】", 35.0),
+    StoreConfig("39号店 --孕妇装", 35.0),
+    StoreConfig("37号店-【十月结晶孕妇装】", 35.0),
+    StoreConfig("18号店 -【童装】", 35.0),
 ]
 
 CATEGORY_MARGIN_THRESHOLDS = {
@@ -417,6 +420,7 @@ def fill_purchase_costs(
 
         report_rows.append({
             "行号": idx, "货品编码": sku, "采购方式": df.at[idx, method_col],
+            "商品ID": df.at[idx, "style_id"] if "style_id" in df.columns else "",
             "采购日期": pdate, "状态": status, "回填单价": avg,
         })
 
@@ -503,26 +507,39 @@ COLUMN_MAP = {
 def _adapt_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     适配A/B组列名差异，统一为 COLUMN_MAP 可识别的列名。
-    A组: '1-实际成本价' → '实际采购价',  '采购方式' (已一致)
-    B组: '商品单价' → '实际采购价',       '3-采购方式' → '采购方式'
+    当A/B组concat后，同一语义有多个列（如 '1-实际成本价' 和 '商品单价'），
+    需要逐行合并（coalesce）到统一列名。
     """
-    rename_map = {}
+    df = df.copy()
 
-    # 成本列适配
-    if "实际采购价" not in df.columns:
-        if "1-实际成本价" in df.columns:
-            rename_map["1-实际成本价"] = "实际采购价"
-        elif "商品单价" in df.columns:
-            rename_map["商品单价"] = "实际采购价"
+    # ── 成本列合并 → '实际采购价' ──
+    cost_sources = ["实际采购价", "1-实际成本价", "商品单价"]
+    existing_cost = [c for c in cost_sources if c in df.columns]
+    if existing_cost:
+        # coalesce: 按优先级取第一个非空值
+        merged = df[existing_cost[0]]
+        for col in existing_cost[1:]:
+            merged = merged.fillna(df[col])
+        df["实际采购价"] = merged
+        # 清理冗余列
+        for col in existing_cost:
+            if col != "实际采购价" and col in df.columns:
+                df = df.drop(columns=[col])
+        logger.info(f"成本列合并: {existing_cost} → '实际采购价'")
 
-    # 采购方式列适配
-    if "采购方式" not in df.columns:
-        if "3-采购方式" in df.columns:
-            rename_map["3-采购方式"] = "采购方式"
+    # ── 采购方式合并 → '采购方式' ──
+    method_sources = ["采购方式", "3-采购方式"]
+    existing_method = [c for c in method_sources if c in df.columns]
+    if existing_method:
+        merged = df[existing_method[0]]
+        for col in existing_method[1:]:
+            merged = merged.fillna(df[col])
+        df["采购方式"] = merged
+        for col in existing_method:
+            if col != "采购方式" and col in df.columns:
+                df = df.drop(columns=[col])
+        logger.info(f"采购方式合并: {existing_method} → '采购方式'")
 
-    if rename_map:
-        logger.info(f"列名适配: {rename_map}")
-        df = df.rename(columns=rename_map)
     return df
 
 
@@ -747,6 +764,34 @@ def save_json(data, output_path):
     logger.info(f"JSON已保存: {output_path}")
 
 
+def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd.DataFrame):
+    """输出回填报告 + 待人工处理清单，无论是否有回填数据都尝试生成"""
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    # 回填报告
+    if not fill_report.empty:
+        fill_report.to_excel(str(report_dir / "回填报告.xlsx"), index=False)
+        logger.info(f"回填报告已保存: {report_dir / '回填报告.xlsx'}")
+
+    # 待人工处理清单（始终生成）
+    unmatched = pd.DataFrame(columns=["货品编码", "采购方式", "商品ID"])
+    if not fill_report.empty:
+        unmatched = fill_report[fill_report["状态"] == "未匹配"][
+            ["货品编码", "采购方式", "商品ID"]
+        ].drop_duplicates()
+
+    missing_price = pd.DataFrame(columns=["来源", "采购日期", "货品编码", "数量"])
+    if not replen_master.empty and "漏填标记" in replen_master.columns:
+        mp = replen_master[replen_master["漏填标记"]]
+        if not mp.empty:
+            missing_price = mp[["来源", "采购日期", "货品编码", "数量"]]
+
+    with pd.ExcelWriter(str(report_dir / "待人工处理清单.xlsx")) as w:
+        unmatched.to_excel(w, sheet_name="未匹配货品编码", index=False)
+        missing_price.to_excel(w, sheet_name="补货表漏填采购价", index=False)
+    logger.info(f"待人工处理清单已保存: {report_dir / '待人工处理清单.xlsx'}")
+
+
 # ============================================================
 # 7. 主流程 (v3)
 # ============================================================
@@ -808,20 +853,7 @@ def run_pipeline(
 
     # Step 7: 输出回填报告和待处理清单
     report_dir = Path(output_path).parent
-    if not fill_report.empty:
-        fill_report.to_excel(str(report_dir / "回填报告.xlsx"), index=False)
-        # 待人工处理清单
-        unmatched = fill_report[fill_report["状态"] == "未匹配"][
-            ["货品编码", "采购方式"]
-        ].drop_duplicates()
-        missing_price = replen_master[replen_master["漏填标记"]][
-            ["来源", "采购日期", "货品编码", "数量"]
-        ] if not replen_master.empty else pd.DataFrame()
-        with pd.ExcelWriter(str(report_dir / "待人工处理清单.xlsx")) as w:
-            unmatched.to_excel(w, sheet_name="未匹配货品编码", index=False)
-            if not missing_price.empty:
-                missing_price.to_excel(w, sheet_name="补货表漏填采购价", index=False)
-        logger.info(f"回填报告和待处理清单已保存到 {report_dir}")
+    _save_reports(report_dir, fill_report, replen_master)
 
     # 摘要
     s = dashboard_data["summary"]["全部"]
