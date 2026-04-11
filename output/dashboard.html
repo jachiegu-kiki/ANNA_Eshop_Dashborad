@@ -140,6 +140,8 @@ body {
 .cat-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
 .cat-name { font-size: 14px; font-weight: 700; }
 .cat-warn-icon { margin-left: auto; color: var(--warn); font-size: 16px; }
+.cat-criteria { font-size: 10px; color: var(--text-muted); background: var(--bg); padding: 4px 8px; border-radius: 6px; margin-bottom: 10px; line-height: 1.6; }
+.cat-criteria-warn { color: var(--warn); opacity: .75; }
 .cat-metrics { display: flex; flex-direction: column; gap: 10px; }
 .cat-metric { display: flex; justify-content: space-between; align-items: baseline; }
 .cat-metric-label { font-size: 11px; color: var(--text-muted); font-weight: 500; }
@@ -552,6 +554,23 @@ function render() {
     </div>`;
 
   // ── 产品定位卡片 ──
+  const targetM = DB.config.global_margin_warning;
+  const tUpper = targetM + 10;
+  const tLower = targetM - 10;
+  const tQty = DB.config.traffic_qty_share_threshold || 5;
+  const catThresholds = DB.config.category_thresholds;
+  const CAT_CRITERIA = {
+    '利润款': `判定：毛利率 ≥ ${tUpper}%`,
+    '基础款': `判定：${tLower}% ≤ 毛利率 ≤ ${tUpper}%`,
+    '流量款': `判定：毛利率 < ${tLower}% 且 销量占比 ≥ ${tQty}%`,
+    '调整款': `判定：毛利率 < ${tLower}% 且 销量占比 < ${tQty}%`,
+  };
+  const CAT_WARN_RULE = {
+    '利润款': `⚠ 红框：平均毛利率 < ${catThresholds['利润款']}%`,
+    '基础款': `⚠ 红框：平均毛利率 < ${catThresholds['基础款']}%`,
+    '流量款': `⚠ 红框：平均毛利率 < ${catThresholds['流量款']}%`,
+    '调整款': `⚠ 红框：平均毛利率 < ${catThresholds['调整款']}%`,
+  };
   let catHTML = '';
   CAT_ORDER.forEach(cat => {
     const c = cats[cat];
@@ -562,6 +581,7 @@ function render() {
           <div class="cat-name">${cat}</div>
           ${c.margin_warning ? '<div class="cat-warn-icon">⚠</div>' : ''}
         </div>
+        <div class="cat-criteria">${CAT_CRITERIA[cat]}<br><span class="cat-criteria-warn">${CAT_WARN_RULE[cat]}</span></div>
         <div class="cat-metrics">
           <div class="cat-metric">
             <span class="cat-metric-label">款式数</span>
@@ -578,10 +598,6 @@ function render() {
           <div class="cat-metric">
             <span class="cat-metric-label">平均毛利率</span>
             <span class="cat-metric-value ${c.style_count > 0 ? (c.margin_warning ? 'margin-warn' : 'margin-good') : ''}">${c.style_count > 0 ? c.margin_rate.toFixed(1) + '%' : '-'}</span>
-          </div>
-          <div class="cat-metric">
-            <span class="cat-metric-label" style="font-size:10px">毛利率标准 ≥${c.margin_threshold}%</span>
-            <span></span>
           </div>
         </div>
       </div>`;
