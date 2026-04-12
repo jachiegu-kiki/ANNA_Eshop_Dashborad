@@ -158,29 +158,34 @@ body {
   display: flex; align-items: center; justify-content: space-between;
 }
 .rank-panel-title { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px; }
-.rank-toggle { display: flex; gap: 2px; background: var(--bg); border-radius: 6px; padding: 2px; }
-.rank-toggle button {
-  background: none; border: none; color: var(--text-muted);
-  font-size: 10px; font-family: inherit; padding: 3px 8px;
-  border-radius: 4px; cursor: pointer; transition: all .15s; white-space: nowrap;
-}
-.rank-toggle button.active { background: var(--accent); color: #0a0e17; font-weight: 600; }
-.rank-list { max-height: 340px; overflow-y: auto; padding: 6px 0; }
+.rank-list { max-height: 380px; overflow-y: auto; padding: 0; }
 .rank-list::-webkit-scrollbar { width: 4px; }
 .rank-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-.rank-item { display: flex; align-items: center; padding: 8px 16px; gap: 10px; transition: background .15s; }
-.rank-item:hover { background: var(--surface2); }
-.rank-num {
-  width: 22px; height: 22px; border-radius: 6px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 700; font-family: 'DM Sans';
-  flex-shrink: 0; background: var(--surface2); color: var(--text-muted);
+.rank-table { width: 100%; border-collapse: collapse; }
+.rank-table th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface2); font-size: 10px; color: var(--text-muted); font-weight: 600;
+  padding: 6px 6px; text-align: right; cursor: pointer; user-select: none;
+  white-space: nowrap; border-bottom: 1px solid var(--border); transition: color .15s;
 }
-.rank-item:nth-child(1) .rank-num { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #0a0e17; }
-.rank-item:nth-child(2) .rank-num { background: linear-gradient(135deg, #94a3b8, #64748b); color: #0a0e17; }
-.rank-item:nth-child(3) .rank-num { background: linear-gradient(135deg, #b45309, #92400e); color: #fde68a; }
-.rank-sku { flex:1; font-size:11px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.rank-val { font-size:12px; font-weight:600; font-family:'DM Sans'; color:var(--text); white-space:nowrap; }
+.rank-table th:hover { color: var(--accent); }
+.rank-table th.sort-active { color: var(--accent); }
+.rank-table th:first-child { text-align: center; width: 28px; cursor: default; }
+.rank-table th:nth-child(2) { text-align: left; }
+.rank-table td { font-size: 11px; padding: 7px 6px; text-align: right; color: var(--text-dim); border-bottom: 1px solid rgba(30,41,59,0.4); }
+.rank-table td:first-child { text-align: center; }
+.rank-table td:nth-child(2) { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80px; }
+.rank-table tr:hover td { background: var(--surface2); }
+.rank-table .rank-num-cell {
+  width: 20px; height: 20px; border-radius: 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; font-family: 'DM Sans';
+  background: var(--surface2); color: var(--text-muted);
+}
+.rank-table tr:nth-child(1) .rank-num-cell { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #0a0e17; }
+.rank-table tr:nth-child(2) .rank-num-cell { background: linear-gradient(135deg, #94a3b8, #64748b); color: #0a0e17; }
+.rank-table tr:nth-child(3) .rank-num-cell { background: linear-gradient(135deg, #b45309, #92400e); color: #fde68a; }
+.sort-arrow { font-size: 9px; margin-left: 2px; }
 
 /* ── Error ── */
 .error-box {
@@ -260,6 +265,7 @@ body {
 
   <div style="display:flex;gap:12px;margin-top:32px;flex-wrap:wrap">
     <button class="dl-btn" onclick="downloadFile('采购明细表.xlsx')">⬇ 采购明细表</button>
+    <button class="dl-btn" onclick="downloadFile('补货备货明细表.xlsx')">⬇ 补货备货明细表</button>
     <button class="dl-btn" onclick="downloadFile('待人工处理清单.xlsx')">⬇ 待人工处理清单</button>
     <button class="dl-btn" onclick="downloadFile('回填报告.xlsx')">⬇ 回填报告</button>
   </div>
@@ -615,14 +621,9 @@ function render() {
             <span style="width:8px;height:8px;border-radius:50%;background:${CAT_COLORS[cat]};display:inline-block"></span>
             ${cat}
           </div>
-          <div class="rank-toggle">
-            <button class="active" onclick="switchRank(this,'${cat}','gmv')">GMV</button>
-            <button onclick="switchRank(this,'${cat}','qty')">销售量</button>
-            <button onclick="switchRank(this,'${cat}','margin')">毛利率</button>
-          </div>
         </div>
         <div class="rank-list" id="rank-${cat}">
-          ${buildRankItems(catStyles, 'gmv')}
+          ${buildRankTable(catStyles, cat, 'margin', 'desc')}
         </div>
       </div>`;
   });
@@ -669,38 +670,61 @@ function downloadFile(filename) {
   window.open('/download/' + encodeURIComponent(filename), '_blank');
 }
 
-// ── 排名列表 ──
-function buildRankItems(items, metric) {
-  let sorted;
-  if (metric === 'gmv')    sorted = [...items].sort((a, b) => b.gmv - a.gmv);
-  else if (metric === 'qty') sorted = [...items].sort((a, b) => b.qty - a.qty);
-  else                       sorted = [...items].sort((a, b) => b.margin_rate - a.margin_rate);
+// ── 排名表格（同时显示 GMV / 销售量 / 毛利率，可点击排序） ──
+const rankSortState = {};  // { cat: { metric: 'margin', dir: 'desc' } }
 
+function buildRankTable(items, cat, sortMetric, sortDir) {
+  rankSortState[cat] = { metric: sortMetric, dir: sortDir };
+
+  const sorted = [...items].sort((a, b) => {
+    const key = sortMetric === 'gmv' ? 'gmv' : sortMetric === 'qty' ? 'qty' : 'margin_rate';
+    return sortDir === 'desc' ? b[key] - a[key] : a[key] - b[key];
+  });
   const top = sorted.slice(0, 20);
-  if (!top.length) return '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:12px">暂无数据</div>';
 
-  return top.map((item, i) => {
-    let val;
-    if (metric === 'gmv')    val = '¥' + fmtNum(item.gmv);
-    else if (metric === 'qty') val = fmtNum(item.qty, 0) + '件';
-    else                       val = item.margin_rate.toFixed(1) + '%';
+  function thArrow(metric) {
+    if (rankSortState[cat].metric !== metric) return '';
+    return `<span class="sort-arrow">${rankSortState[cat].dir === 'desc' ? '▼' : '▲'}</span>`;
+  }
+  function thClass(metric) {
+    return rankSortState[cat].metric === metric ? 'sort-active' : '';
+  }
 
-    return `
-      <div class="rank-item">
-        <div class="rank-num">${i + 1}</div>
-        <div class="rank-sku" title="${item.style_id}">${item.style_id}</div>
-        <div class="rank-val">${val}</div>
-      </div>`;
-  }).join('');
+  let html = `<table class="rank-table">
+    <thead><tr>
+      <th>#</th><th>商品ID</th>
+      <th class="${thClass('gmv')}" onclick="toggleRankSort('${cat}','gmv')">GMV${thArrow('gmv')}</th>
+      <th class="${thClass('qty')}" onclick="toggleRankSort('${cat}','qty')">销售量${thArrow('qty')}</th>
+      <th class="${thClass('margin')}" onclick="toggleRankSort('${cat}','margin')">毛利率${thArrow('margin')}</th>
+    </tr></thead><tbody>`;
+
+  if (!top.length) {
+    html += `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px;font-size:12px">暂无数据</td></tr>`;
+  } else {
+    top.forEach((item, i) => {
+      html += `<tr>
+        <td><span class="rank-num-cell">${i + 1}</span></td>
+        <td title="${item.style_id}">${item.style_id}</td>
+        <td style="font-family:'DM Sans';font-weight:${sortMetric==='gmv'?'700':'400'}">¥${fmtNum(item.gmv)}</td>
+        <td style="font-family:'DM Sans';font-weight:${sortMetric==='qty'?'700':'400'}">${fmtNum(item.qty, 0)}</td>
+        <td style="font-family:'DM Sans';font-weight:${sortMetric==='margin'?'700':'400'};color:${item.margin_rate >= (DB.config.global_margin_warning||35) ? 'var(--good)' : 'var(--warn)'}">${item.margin_rate.toFixed(1)}%</td>
+      </tr>`;
+    });
+  }
+  html += '</tbody></table>';
+  return html;
 }
 
-function switchRank(btn, cat, metric) {
-  const panel = btn.closest('.rank-panel');
-  panel.querySelectorAll('.rank-toggle button').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-
+function toggleRankSort(cat, metric) {
+  const state = rankSortState[cat] || { metric: 'margin', dir: 'desc' };
+  let newDir;
+  if (state.metric === metric) {
+    newDir = state.dir === 'desc' ? 'asc' : 'desc';
+  } else {
+    newDir = 'desc';
+  }
   const styles = getFilteredStyles().filter(s => s.category === cat);
-  document.getElementById(`rank-${cat}`).innerHTML = buildRankItems(styles, metric);
+  document.getElementById(`rank-${cat}`).innerHTML = buildRankTable(styles, cat, metric, newDir);
 }
 
 // ── 启动 ──
