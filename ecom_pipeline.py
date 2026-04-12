@@ -556,6 +556,19 @@ def _adapt_columns(df: pd.DataFrame) -> pd.DataFrame:
                 df = df.drop(columns=[col])
         logger.info(f"采购方式合并: {existing_method} → '采购方式'")
 
+    # ── 订单状态合并 → '订单状态' ──
+    status_sources = ["订单状态", "訂單狀態", "4-订单状态"]
+    existing_status = [c for c in status_sources if c in df.columns]
+    if existing_status:
+        merged = df[existing_status[0]]
+        for col in existing_status[1:]:
+            merged = merged.fillna(df[col])
+        df["订单状态"] = merged
+        for col in existing_status:
+            if col != "订单状态" and col in df.columns:
+                df = df.drop(columns=[col])
+        logger.info(f"订单状态合并: {existing_status} → '订单状态'")
+
     return df
 
 
@@ -573,7 +586,7 @@ def clean_data(
     5. 过滤成本价仍为0的行
     6. 日期解析 → 汇率 → CNY → 毛利润
 
-    Returns: (清洗后df, 回填报告df)
+    Returns: (清洗后df, 回填报告df, 采购单价为零df)
     """
     # ── 列名适配 ──
     df = _adapt_columns(df)
@@ -624,6 +637,23 @@ def clean_data(
     else:
         logger.warning("未提供补货明细表，跳过成本回填")
 
+    # ── 过滤无效记录：不采购/未采购/客户取消订单/已取消 ──
+    EXCLUDE_METHODS = {"不采购/未采购", "客户取消订单"}
+    before = len(df)
+    mask_method = df["purchase_method"].astype(str).str.strip().isin(EXCLUDE_METHODS)
+    # 订单状态列（可选，非 COLUMN_MAP 必须字段）
+    mask_status = pd.Series(False, index=df.index)
+    if "订单状态" in df.columns:
+        CANCEL_KEYWORDS = {"已取消"}
+        mask_status = df["订单状态"].astype(str).str.strip().isin(CANCEL_KEYWORDS)
+    df = df[~(mask_method | mask_status)].copy()
+    logger.info(f"过滤无效记录(不采购/取消): {before} → {len(df)} 行")
+
+    # ── 捕获采购单价为0的记录（供待人工处理清单使用） ──
+    zero_cost_df = df[df["cost_price"] <= 0][["_source_file", "sku_code", "order_id"]].copy()
+    zero_cost_df.columns = ["来源", "货品编码", "订单号"]
+    zero_cost_df = zero_cost_df.drop_duplicates()
+
     # ── 过滤成本价仍为0的行（回填后） ──
     before = len(df)
     df = df[df["cost_price"] > 0].copy()
@@ -664,7 +694,7 @@ def clean_data(
     logger.info(f"清洗完成: {len(df)} 行, GMV(CNY)=¥{df['sale_price'].sum():,.2f}, "
                 f"利润=¥{df['profit'].sum():,.2f}")
 
-    return df, fill_report
+    return df, fill_report, zero_cost_df
 
 
 # ============================================================
@@ -784,7 +814,7 @@ def save_json(data, output_path):
     logger.info(f"JSON已保存: {output_path}")
 
 
-def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd.DataFrame):
+def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd.DataFrame, zero_cost_df: pd.DataFrame = None):
     """输出回填报告 + 待人工处理清单，无论是否有回填数据都尝试生成"""
     report_dir.mkdir(parents=True, exist_ok=True)
 
@@ -800,15 +830,24 @@ def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd
             ["货品编码", "采购方式", "商品ID", "来源"]
         ].drop_duplicates()
 
+    # 未匹配的货品编码集合（用于排除）
+    unmatched_skus = set(unmatched["货品编码"].unique()) if not unmatched.empty else set()
+
     missing_price = pd.DataFrame(columns=["来源", "采购日期", "货品编码", "数量"])
     if not replen_master.empty and "漏填标记" in replen_master.columns:
         mp = replen_master[replen_master["漏填标记"]]
         if not mp.empty:
             missing_price = mp[["来源", "采购日期", "货品编码", "数量"]]
 
+    # 采购金额为零：剔除已在"未匹配货品编码"中的记录
+    zero_cost = pd.DataFrame(columns=["来源", "货品编码", "订单号"])
+    if zero_cost_df is not None and not zero_cost_df.empty:
+        zero_cost = zero_cost_df[~zero_cost_df["货品编码"].isin(unmatched_skus)].copy()
+
     with pd.ExcelWriter(str(report_dir / "待人工处理清单.xlsx")) as w:
         unmatched.to_excel(w, sheet_name="未匹配货品编码", index=False)
         missing_price.to_excel(w, sheet_name="补货表漏填采购价", index=False)
+        zero_cost.to_excel(w, sheet_name="采购金额为零", index=False)
     logger.info(f"待人工处理清单已保存: {report_dir / '待人工处理清单.xlsx'}")
 
 
@@ -844,6 +883,24 @@ def _save_purchase_detail(clean_df: pd.DataFrame, report_dir: Path):
     out_path = report_dir / "采购明细表.xlsx"
     detail.to_excel(str(out_path), index=False)
     logger.info(f"采购明细表已保存: {out_path} ({len(detail)} 行)")
+
+
+def _save_replen_detail(replen_master: pd.DataFrame, report_dir: Path):
+    """输出整理过的补货备货明细表"""
+    if replen_master.empty:
+        return
+    # 只取有效记录（非漏填）
+    df = replen_master[~replen_master["漏填标记"]].copy() if "漏填标记" in replen_master.columns else replen_master.copy()
+    detail = pd.DataFrame({
+        "采购日期": df["采购日期"],
+        "货品编码": df["货品编码"],
+        "实际采购数量": df["数量"],
+        "采购单价": df["采购单价"],
+        "采购金额": (df["采购单价"].fillna(0) * df["数量"].fillna(0)).round(2),
+    })
+    out_path = report_dir / "补货备货明细表.xlsx"
+    detail.to_excel(str(out_path), index=False)
+    logger.info(f"补货备货明细表已保存: {out_path} ({len(detail)} 行)")
 
 
 # ============================================================
@@ -935,7 +992,7 @@ def run_pipeline(
     # Step 3: 清洗（含成本回填 + 汇率）
     fx_service = ExchangeRateService()
     try:
-        clean_df, fill_report = clean_data(raw_df, fx_service, replen_master)
+        clean_df, fill_report, zero_cost_df = clean_data(raw_df, fx_service, replen_master)
     finally:
         fx_service.close()
 
@@ -951,10 +1008,13 @@ def run_pipeline(
 
     # Step 7: 输出回填报告和待处理清单
     report_dir = Path(output_path).parent
-    _save_reports(report_dir, fill_report, replen_master)
+    _save_reports(report_dir, fill_report, replen_master, zero_cost_df)
 
     # Step 8: 输出采购明细表
     _save_purchase_detail(clean_df, report_dir)
+
+    # Step 9: 输出补货备货明细表
+    _save_replen_detail(replen_master, report_dir)
 
     # 摘要
     s = dashboard_data["summary"]["全部"]
