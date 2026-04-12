@@ -347,7 +347,10 @@ FILL_METHODS = {"台湾发货", "福州仓库出", "福州仓出货", "厂家出
 
 
 def _compute_weighted_avg(replen_df, sku, as_of_date) -> float:
-    """计算某SKU截至as_of_date的加权平均采购单价 = Σ合计金额/Σ数量"""
+    """计算某SKU截至as_of_date的加权平均采购单价 = Σ(采购单价×数量)/Σ数量
+    ★ v3.1 修正：原用Σ合计金额/Σ数量，但补货表有7条合计金额=0（人工漏填），
+      导致均价被拉低50%。改用采购单价×数量避免依赖可能漏填的合计金额字段。
+    """
     mask = (
         (replen_df["货品编码"] == sku)
         & (~replen_df["漏填标记"])
@@ -357,7 +360,7 @@ def _compute_weighted_avg(replen_df, sku, as_of_date) -> float:
     subset = replen_df[mask]
     if subset.empty:
         return 0.0
-    total_amount = subset["合计金额"].fillna(0).sum()
+    total_amount = (subset["采购单价"].fillna(0) * subset["数量"].fillna(0)).sum()
     total_qty = subset["数量"].fillna(0).sum()
     return round(total_amount / total_qty, 2) if total_qty > 0 else 0.0
 
@@ -617,6 +620,19 @@ def clean_data(
 
     df["qty"] = 1
 
+    # ── 过滤无效记录：不采购/未采购/客户取消订单/已取消 ──
+    # ★ v3.1 修正：必须在分摊之前过滤，否则被取消的商品会撑大分母，
+    #   导致同订单内有效商品的分摊金额偏低（影响158个混合订单）
+    EXCLUDE_METHODS = {"不采购/未采购", "客户取消订单"}
+    before = len(df)
+    mask_method = df["purchase_method"].astype(str).str.strip().isin(EXCLUDE_METHODS)
+    mask_status = pd.Series(False, index=df.index)
+    if "订单状态" in df.columns:
+        CANCEL_KEYWORDS = {"已取消"}
+        mask_status = df["订单状态"].astype(str).str.strip().isin(CANCEL_KEYWORDS)
+    df = df[~(mask_method | mask_status)].copy()
+    logger.info(f"过滤无效记录(不采购/取消): {before} → {len(df)} 行")
+
     # ── 按订单分摊销售价(TWD) ──
     order_total_price = df.groupby("order_id")["item_price_twd"].transform("sum")
     df["sale_price_twd"] = (df["item_price_twd"] / order_total_price * df["paid_amount_twd"]).round(2)
@@ -636,18 +652,6 @@ def clean_data(
         logger.info("=" * 40)
     else:
         logger.warning("未提供补货明细表，跳过成本回填")
-
-    # ── 过滤无效记录：不采购/未采购/客户取消订单/已取消 ──
-    EXCLUDE_METHODS = {"不采购/未采购", "客户取消订单"}
-    before = len(df)
-    mask_method = df["purchase_method"].astype(str).str.strip().isin(EXCLUDE_METHODS)
-    # 订单状态列（可选，非 COLUMN_MAP 必须字段）
-    mask_status = pd.Series(False, index=df.index)
-    if "订单状态" in df.columns:
-        CANCEL_KEYWORDS = {"已取消"}
-        mask_status = df["订单状态"].astype(str).str.strip().isin(CANCEL_KEYWORDS)
-    df = df[~(mask_method | mask_status)].copy()
-    logger.info(f"过滤无效记录(不采购/取消): {before} → {len(df)} 行")
 
     # ── 捕获采购单价为0的记录（供待人工处理清单使用） ──
     zero_cost_df = df[df["cost_price"] <= 0][["_source_file", "sku_code", "order_id"]].copy()
@@ -702,6 +706,10 @@ def clean_data(
 # ============================================================
 
 def aggregate_styles(df: pd.DataFrame) -> pd.DataFrame:
+    # ★ v3.1 修正：purchase_method 为 NaN 时 groupby 会静默丢弃该行
+    df = df.copy()
+    df["purchase_method"] = df["purchase_method"].fillna("未知")
+
     agg = df.groupby(["store", "style_id", "year_month", "purchase_method"]).agg(
         gmv=("sale_price", "sum"), qty=("qty", "sum"),
         profit=("profit", "sum"), cost=("cost_price", "sum"),
@@ -930,7 +938,7 @@ def _auto_discover_replen(search_dir: Path) -> Tuple[Optional[str], Optional[str
             continue
         for f in d.glob("*.xlsx"):
             name = f.name
-            if "备货" in name or "補貨" in name:
+            if "备货" in name or "補貨" in name or "补货" in name:
                 if "A组" in name and not replen_a:
                     replen_a = str(f)
                     logger.info(f"自动发现A组补货表: {f}")
