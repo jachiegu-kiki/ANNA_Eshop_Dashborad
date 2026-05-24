@@ -55,7 +55,11 @@ CACHE_DIR     = BASE_DIR / "cache"
 ARCHIVE_DIR   = BASE_DIR / "archive"
 LOG_DIR       = BASE_DIR / "logs"
 CONFIG_FILE   = BASE_DIR / ".env"
-PIPELINE_FILE = BASE_DIR / "ecom_pipeline_v3.py"
+# 管道脚本：repo 已将 ecom_pipeline_v3.py 重命名为 ecom_pipeline.py，
+# 这里自动探测，兼容两种命名，避免 "管道脚本不存在" 导致整条流程失效。
+PIPELINE_FILE = BASE_DIR / "ecom_pipeline.py"
+if not PIPELINE_FILE.exists() and (BASE_DIR / "ecom_pipeline_v3.py").exists():
+    PIPELINE_FILE = BASE_DIR / "ecom_pipeline_v3.py"
 
 for d in [UPLOAD_DIR, DATA_DIR, OUTPUT_DIR, CACHE_DIR, ARCHIVE_DIR, LOG_DIR]:
     d.mkdir(parents=True, exist_ok=True)

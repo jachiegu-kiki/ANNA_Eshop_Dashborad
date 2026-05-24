@@ -365,18 +365,185 @@ def _compute_weighted_avg(replen_df, sku, as_of_date) -> float:
     return round(total_amount / total_qty, 2) if total_qty > 0 else 0.0
 
 
+# ── 人工成本台帐（服务器端单一事实来源）──
+#
+# 设计（第一性原理 / 逆向）：
+#   人工成本以 (订单号, 货品编码) 为唯一键 —— 同一货品在不同订单/时间成本可能不同，
+#   必须精确到「采购实例」，避免一个价错配到所有同款行。
+#
+#   台帐是【单一事实来源】，持久化在 output/人工成本台账.json，跨上传保留
+#   （app.py 的 replace 模式只归档 uploads_raw/data，不触碰 output，故天然持久）。
+#   每轮流程：载入台帐 → 合并本轮上传清单的改动 → 存回 → 套用整份台帐。
+#
+#   员工回传的「待人工处理清单」用两个 sheet 与台帐交互：
+#     · 『未匹配货品编码』：本轮【新填】(成本单价>0 → upsert 进台帐)。
+#     · 『已填成本台账』  ：历史台帐镜像，供【修正】——
+#                          成本单价>0 → upsert（改价）；留空或<=0 → delete（撤销该条）。
+#   于是「过滤已填」(需求3) 与「填错可修正」(需求3) 互不冲突：
+#     未匹配 sheet 永远只列没价的；要改已填的就在台帐 sheet 改。
+#   且即使员工上传的清单漏掉某些行，台帐仍在服务器端保留，数据不丢失。
+
+LEDGER_FILENAME = "人工成本台账.json"
+MANUAL_SHEET    = "未匹配货品编码"
+LEDGER_SHEET    = "已填成本台账"
+PRICE_COLS      = ["成本单价", "成本單價", "采购单价", "采购价", "成本价"]
+
+
+def load_ledger(ledger_path) -> Dict[Tuple[str, str], dict]:
+    """从磁盘载入台帐。返回 {(订单号, 货品编码): {成本单价, 更新时间, 来源}}。损坏/不存在 → 空。"""
+    p = Path(ledger_path)
+    if not p.exists():
+        return {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            recs = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning(f"人工成本台账损坏，按空处理: {e}")
+        return {}
+
+    ledger: Dict[Tuple[str, str], dict] = {}
+    for r in recs if isinstance(recs, list) else []:
+        oid = _norm_sku(r.get("订单号"))
+        sku = _norm_sku(r.get("货品编码"))
+        cost = pd.to_numeric(r.get("成本单价"), errors="coerce")
+        if oid and sku and pd.notna(cost) and cost > 0:
+            ledger[(oid, sku)] = {
+                "成本单价": round(float(cost), 2),
+                "更新时间": str(r.get("更新时间", "")),
+                "来源":     str(r.get("来源", "")),
+            }
+    logger.info(f"人工成本台账已载入: {len(ledger)} 条")
+    return ledger
+
+
+def save_ledger(ledger_path, ledger: Dict[Tuple[str, str], dict]):
+    """将台帐写回磁盘（list of records，按键排序，便于人工稽核与 diff）。"""
+    recs = [{
+        "订单号": k[0], "货品编码": k[1],
+        "成本单价": v["成本单价"], "更新时间": v.get("更新时间", ""), "来源": v.get("来源", ""),
+    } for k, v in sorted(ledger.items())]
+    Path(ledger_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(ledger_path, "w", encoding="utf-8") as f:
+        json.dump(recs, f, ensure_ascii=False, indent=2)
+    logger.info(f"人工成本台账已保存: {ledger_path} ({len(recs)} 条)")
+
+
+def _iter_list_rows(filepath: str, sheet: str):
+    """逐行产出 (订单号, 货品编码, 成本单价|None)。price=None 表示该行留空。"""
+    try:
+        df = pd.read_excel(filepath, sheet_name=sheet, engine="openpyxl", dtype=str)
+    except Exception as e:
+        logger.warning(f"读取 {Path(filepath).name}[{sheet}] 失败: {e}")
+        return
+    price_col = next((c for c in PRICE_COLS if c in df.columns), None)
+    if price_col is None or "货品编码" not in df.columns or "订单号" not in df.columns:
+        logger.warning(f"{Path(filepath).name}[{sheet}] 缺少必要列(订单号/货品编码/成本单价)，跳过")
+        return
+    for _, row in df.iterrows():
+        sku = _norm_sku(row.get("货品编码"))
+        oid = _norm_sku(row.get("订单号"))
+        if not sku or not oid:
+            continue
+        price = pd.to_numeric(row.get(price_col), errors="coerce")
+        yield oid, sku, (None if pd.isna(price) else float(price))
+
+
+def read_uploaded_manual(input_path: str):
+    """
+    读取本轮上传的「待人工处理清单」，解析出对台帐的改动。
+    返回 (upserts: {(oid,sku): price}, deletes: set[(oid,sku)], src_name: str)。
+    无文件/无 sheet → 空改动（绝不报错）。
+    """
+    path = Path(input_path)
+    files: List[str] = []
+    if path.is_dir():
+        files = [str(f) for f in path.glob("*.xlsx")
+                 if ("处理清单" in f.name or "處理清單" in f.name)]
+    elif path.is_file() and ("处理清单" in path.name or "處理清單" in path.name):
+        files = [str(path)]
+
+    upserts: Dict[Tuple[str, str], float] = {}
+    deletes: set = set()
+    src_name = ""
+
+    for fp in files:
+        src_name = Path(fp).name
+        try:
+            sheets = pd.ExcelFile(fp, engine="openpyxl").sheet_names
+        except Exception as e:
+            logger.warning(f"读取人工清单失败 {src_name}: {e}")
+            continue
+
+        # 『未匹配货品编码』：仅新填（>0 → upsert）
+        if MANUAL_SHEET in sheets:
+            for oid, sku, price in _iter_list_rows(fp, MANUAL_SHEET):
+                if price is not None and price > 0:
+                    upserts[(oid, sku)] = round(price, 2)
+
+        # 『已填成本台账』：修正（>0 → upsert 改价；空/<=0 → delete 撤销）
+        if LEDGER_SHEET in sheets:
+            for oid, sku, price in _iter_list_rows(fp, LEDGER_SHEET):
+                if price is not None and price > 0:
+                    upserts[(oid, sku)] = round(price, 2)
+                else:
+                    deletes.add((oid, sku))
+
+    if upserts or deletes:
+        logger.info(f"本轮人工清单改动: 新增/修改 {len(upserts)} 条, 撤销 {len(deletes)} 条")
+    return upserts, deletes, src_name
+
+
+def apply_ledger_changes(ledger: Dict[Tuple[str, str], dict], upserts, deletes, src="") -> Tuple[int, int]:
+    """
+    将本轮改动合并进台帐（原地修改）。
+    冲突处理：先 delete 再 upsert —— 若同键既被撤销又给了正值，以正值为准（修正优先于撤销）。
+    返回 (变更条数, 撤销条数)。
+    """
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    n_del = 0
+    for k in deletes:
+        if k in ledger and k not in upserts:   # 给了新值的不算撤销
+            del ledger[k]
+            n_del += 1
+    n_up = 0
+    for k, price in upserts.items():
+        price = round(float(price), 2)
+        old = ledger.get(k, {}).get("成本单价")
+        if old != price:                        # 仅在变化时更新时间戳，保留历史填写时间
+            ledger[k] = {"成本单价": price, "更新时间": ts, "来源": src}
+            n_up += 1
+    if n_up or n_del:
+        logger.info(f"台账合并完成: 实际变更 {n_up} 条, 撤销 {n_del} 条, 现存 {len(ledger)} 条")
+    return n_up, n_del
+
+
+def ledger_to_costmap(ledger: Dict[Tuple[str, str], dict]) -> Dict[Tuple[str, str], float]:
+    """台帐 → 回填用 {(订单号,货品编码): 成本单价}。"""
+    return {k: v["成本单价"] for k, v in ledger.items()}
+
+
 def fill_purchase_costs(
     purchase_df: pd.DataFrame,
     replen_df: pd.DataFrame,
+    manual_costs: Optional[Dict[Tuple[str, str], float]] = None,
     method_col: str = "采购方式",
     cost_col: str = "cost_price",
     sku_col: str = "sku_code",
     date_col: str = "date",
+    order_col: str = "order_id",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     回填采购表中缺失的成本价（在 COLUMN_MAP 重命名之后的内部列名上操作）。
+
+    成本优先级（第一性原理 / 奥卡姆：单一职责，只填 cost<=0 的行）：
+      ① 采购表原生成本价 (cost>0)      —— 不动，最高优先（需求4：采购表补上即以它为主）
+      ② 补货备货表加权平均             —— 系统自动
+      ③ 员工人工填写 (manual_costs)    —— 兜底，仅当 ①② 都拿不到价时生效
+
+    manual_costs: {(订单号, 货品编码): 成本单价}
     返回 (回填后的df, 回填报告df)。
     """
+    manual_costs = manual_costs or {}
     df = purchase_df.copy()
 
     # 标准化 SKU
@@ -385,51 +552,64 @@ def fill_purchase_costs(
     # 解析日期
     df[date_col] = df[date_col].apply(_parse_excel_date)
 
-    # 找需要回填的行
+    # 找需要回填的行（cost<=0 即 ① 不成立）
     need_fill = (
         df[method_col].isin(FILL_METHODS)
         & (df[cost_col] <= 0)
         & (df[sku_col] != "")
     )
     fill_indices = df[need_fill].index
-    logger.info(f"成本回填: 需要处理 {len(fill_indices)} 行")
+    logger.info(f"成本回填: 需要处理 {len(fill_indices)} 行 "
+                f"(加权平均源={'有' if not replen_df.empty else '无'}, 人工成本={len(manual_costs)} 条)")
 
-    if len(fill_indices) == 0 or replen_df.empty:
+    # 即使无补货源，只要有人工成本也要继续（员工二次回传场景）
+    if len(fill_indices) == 0:
         return df, pd.DataFrame()
 
     cache = {}
     report_rows = []
-    filled = 0
+    filled_avg = 0
+    filled_manual = 0
 
     for idx in fill_indices:
         sku = df.at[idx, sku_col]
         pdate = df.at[idx, date_col]
+        oid = _norm_sku(df.at[idx, order_col]) if order_col in df.columns else ""
 
-        if pd.isna(pdate):
-            report_rows.append({"行号": idx, "货品编码": sku, "状态": "跳过-无采购日期", "回填单价": 0})
-            continue
-
-        key = (sku, pdate)
-        if key not in cache:
-            cache[key] = _compute_weighted_avg(replen_df, sku, pdate)
-        avg = cache[key]
+        # ② 加权平均（无补货源 / 无采购日期 时为 0）
+        avg = 0.0
+        if not replen_df.empty and pd.notna(pdate):
+            key = (sku, pdate)
+            if key not in cache:
+                cache[key] = _compute_weighted_avg(replen_df, sku, pdate)
+            avg = cache[key]
 
         if avg > 0:
             df.at[idx, cost_col] = avg
-            filled += 1
-            status = "已回填"
+            filled_avg += 1
+            status, source, applied = "已回填", "加权平均", avg
         else:
-            status = "未匹配"
+            # ③ 人工填写兜底（精确匹配 订单号 + 货品编码）
+            manual = manual_costs.get((oid, sku), 0)
+            if manual and manual > 0:
+                df.at[idx, cost_col] = manual
+                filled_manual += 1
+                status, source, applied = "人工已填", "人工填写", manual
+            else:
+                status, source, applied = "未匹配", "", 0
 
         report_rows.append({
             "行号": idx, "货品编码": sku, "采购方式": df.at[idx, method_col],
             "商品ID": df.at[idx, "style_id"] if "style_id" in df.columns else "",
             "来源": df.at[idx, "_source_file"] if "_source_file" in df.columns else "",
-            "采购日期": pdate, "状态": status, "回填单价": avg,
+            "采购日期": pdate, "订单号": oid,
+            "状态": status, "回填来源": source, "回填单价": applied,
         })
 
     report_df = pd.DataFrame(report_rows)
-    logger.info(f"成本回填完成: 成功={filled}, 未匹配={len(fill_indices)-filled}, 总={len(fill_indices)}")
+    unmatched_n = len(fill_indices) - filled_avg - filled_manual
+    logger.info(f"成本回填完成: 加权={filled_avg}, 人工={filled_manual}, "
+                f"未匹配={unmatched_n}, 总={len(fill_indices)}")
     return df, report_df
 
 
@@ -475,7 +655,9 @@ def read_file(filepath: str) -> pd.DataFrame:
 
 def load_data(input_path: str, exclude_keywords: Optional[List[str]] = None) -> pd.DataFrame:
     if exclude_keywords is None:
-        exclude_keywords = ["备货", "补货", "補貨"]  # 排除补货表，避免混入采购数据
+        # 排除补货表 + 系统生成的报表（尤其是员工回传的「待人工处理清单」），
+        # 避免它们被当成采购表读取而污染数据。
+        exclude_keywords = ["备货", "补货", "補貨", "处理清单", "處理清單", "回填报告", "回填報告"]
     path = Path(input_path)
     if path.is_file():
         df = read_file(str(path))
@@ -579,6 +761,7 @@ def clean_data(
     df: pd.DataFrame,
     fx_service: ExchangeRateService,
     replen_master: Optional[pd.DataFrame] = None,
+    manual_costs: Optional[Dict[Tuple[str, str], float]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     数据清洗（v3）：
@@ -637,21 +820,24 @@ def clean_data(
     order_total_price = df.groupby("order_id")["item_price_twd"].transform("sum")
     df["sale_price_twd"] = (df["item_price_twd"] / order_total_price * df["paid_amount_twd"]).round(2)
 
-    # ── ★ v3: 成本回填 ★ ──
-    fill_report = pd.DataFrame()
-    if replen_master is not None and not replen_master.empty:
-        logger.info("=" * 40)
-        logger.info("开始成本回填（补货备货加权平均法）")
-        df, fill_report = fill_purchase_costs(
-            df, replen_master,
-            method_col="purchase_method",
-            cost_col="cost_price",
-            sku_col="sku_code",
-            date_col="date",
-        )
-        logger.info("=" * 40)
-    else:
-        logger.warning("未提供补货明细表，跳过成本回填")
+    # ── ★ v3: 成本回填（加权平均 + 人工兜底）★ ──
+    # 注意：无论是否有补货源/人工成本，都要跑回填 —— 因为「识别未匹配行」本身依赖它，
+    #       否则首次上传(两者皆无)时候选行会被静默丢弃，无法生成待人工清单。
+    manual_costs = manual_costs or {}
+    replen_for_fill = replen_master if replen_master is not None else pd.DataFrame()
+    logger.info("=" * 40)
+    logger.info(f"开始成本回填（加权平均源={'有' if not replen_for_fill.empty else '无'}, "
+                f"人工成本={len(manual_costs)} 条）")
+    df, fill_report = fill_purchase_costs(
+        df, replen_for_fill,
+        manual_costs=manual_costs,
+        method_col="purchase_method",
+        cost_col="cost_price",
+        sku_col="sku_code",
+        date_col="date",
+        order_col="order_id",
+    )
+    logger.info("=" * 40)
 
     # ── 捕获采购单价为0的记录（供待人工处理清单使用） ──
     zero_cost_df = df[df["cost_price"] <= 0][["_source_file", "sku_code", "order_id"]].copy()
@@ -663,6 +849,20 @@ def clean_data(
     df = df[df["cost_price"] > 0].copy()
     excluded = before - len(df)
     logger.info(f"过滤成本价为0: {before} → {len(df)} 行（剔除 {excluded} 行）")
+
+    # ── 空表保护 ──
+    # 若本轮所有行都待人工填写（过滤后为空），仍需返回结构完整的空表，
+    # 让下游照常生成「待人工处理清单」，否则首月(成本全空)会在日期/汇率步骤崩溃，连清单都产不出。
+    if df.empty:
+        logger.warning("过滤后无可计算行（可能成本尚未填写），生成空看板 + 待人工清单")
+        for col, default in [("year", DEFAULT_YEAR), ("month", 0), ("day", 0)]:
+            df[col] = pd.Series(dtype="int64")
+        for col in ["full_date", "year_month"]:
+            df[col] = pd.Series(dtype="object")
+        for col in ["fx_rate", "sale_price", "profit"]:
+            df[col] = pd.Series(dtype="float64")
+        df.attrs["data_cutoff"] = "暂无可计算数据"
+        return df, fill_report, zero_cost_df
 
     # ── 日期解析 ──
     df["date"] = df["date"].apply(_parse_excel_date)
@@ -822,7 +1022,8 @@ def save_json(data, output_path):
     logger.info(f"JSON已保存: {output_path}")
 
 
-def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd.DataFrame, zero_cost_df: pd.DataFrame = None):
+def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd.DataFrame,
+                  zero_cost_df: pd.DataFrame = None, ledger: Dict[Tuple[str, str], dict] = None):
     """输出回填报告 + 待人工处理清单，无论是否有回填数据都尝试生成"""
     report_dir.mkdir(parents=True, exist_ok=True)
 
@@ -831,14 +1032,27 @@ def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd
         fill_report.to_excel(str(report_dir / "回填报告.xlsx"), index=False)
         logger.info(f"回填报告已保存: {report_dir / '回填报告.xlsx'}")
 
-    # 待人工处理清单（始终生成）
-    unmatched = pd.DataFrame(columns=["货品编码", "采购方式", "商品ID", "来源"])
-    if not fill_report.empty:
-        unmatched = fill_report[fill_report["状态"] == "未匹配"][
-            ["货品编码", "采购方式", "商品ID", "来源"]
-        ].drop_duplicates()
+    # ── 待人工处理清单（始终生成）──
+    # 「未匹配货品编码」：经 加权平均 + 人工填写 后仍无成本的采购行，需员工手动填写『成本单价』。
+    #   · 新增『采购日期』『订单号』(来自采购表) —— 作为人工成本回写的精确匹配键（需求1）。
+    #   · 已通过加权平均或人工填写补上成本的行（状态≠未匹配）会被自动过滤掉（需求3：过滤已填过的）。
+    UNMATCHED_COLS = ["货品编码", "商品ID", "采购方式", "采购日期", "订单号", "来源", "成本单价"]
+    unmatched = pd.DataFrame(columns=UNMATCHED_COLS)
+    if not fill_report.empty and "状态" in fill_report.columns:
+        um = fill_report[fill_report["状态"] == "未匹配"].copy()
+        if not um.empty:
+            um["成本单价"] = ""  # 留空，供员工填写
+            for c in ["商品ID", "订单号", "来源", "采购方式"]:
+                if c not in um.columns:
+                    um[c] = ""
+            if "采购日期" not in um.columns:
+                um["采购日期"] = pd.NaT
+            # 订单号 / 货品编码 强制文本，避免 Excel 把长订单号转成科学计数法导致回写失配
+            um["订单号"] = um["订单号"].astype(str)
+            um["货品编码"] = um["货品编码"].astype(str)
+            unmatched = um[UNMATCHED_COLS].drop_duplicates(subset=["订单号", "货品编码"])
 
-    # 未匹配的货品编码集合（用于排除）
+    # 未匹配的货品编码集合（用于排除重复呈现）
     unmatched_skus = set(unmatched["货品编码"].unique()) if not unmatched.empty else set()
 
     missing_price = pd.DataFrame(columns=["来源", "采购日期", "货品编码", "数量"])
@@ -852,11 +1066,28 @@ def _save_reports(report_dir: Path, fill_report: pd.DataFrame, replen_master: pd
     if zero_cost_df is not None and not zero_cost_df.empty:
         zero_cost = zero_cost_df[~zero_cost_df["货品编码"].isin(unmatched_skus)].copy()
 
+    # ── 已填成本台账（台帐镜像，供员工修正/撤销）──
+    # 列『成本单价』可改价；留空或填 0/负数 → 下次上传时该条从台帐撤销。
+    ledger_cols = ["货品编码", "订单号", "成本单价", "更新时间", "来源"]
+    ledger_rows = []
+    if ledger:
+        for (oid, sku), v in sorted(ledger.items()):
+            ledger_rows.append({
+                "货品编码": str(sku), "订单号": str(oid),
+                "成本单价": v.get("成本单价"), "更新时间": v.get("更新时间", ""), "来源": v.get("来源", ""),
+            })
+    ledger_df = pd.DataFrame(ledger_rows, columns=ledger_cols)
+    if not ledger_df.empty:
+        ledger_df["订单号"] = ledger_df["订单号"].astype(str)
+        ledger_df["货品编码"] = ledger_df["货品编码"].astype(str)
+
     with pd.ExcelWriter(str(report_dir / "待人工处理清单.xlsx")) as w:
         unmatched.to_excel(w, sheet_name="未匹配货品编码", index=False)
+        ledger_df.to_excel(w, sheet_name="已填成本台账", index=False)
         missing_price.to_excel(w, sheet_name="补货表漏填采购价", index=False)
         zero_cost.to_excel(w, sheet_name="采购金额为零", index=False)
-    logger.info(f"待人工处理清单已保存: {report_dir / '待人工处理清单.xlsx'}")
+    logger.info(f"待人工处理清单已保存: {report_dir / '待人工处理清单.xlsx'} "
+                f"(未匹配 {len(unmatched)} 条, 台账 {len(ledger_df)} 条)")
 
 
 def _save_purchase_detail(clean_df: pd.DataFrame, report_dir: Path):
@@ -994,13 +1225,27 @@ def run_pipeline(
 
     replen_master = build_replenishment_master(replen_a_path, replen_b_path)
 
+    # Step 1.5: 人工成本台帐（服务器端单一事实来源）
+    #   载入磁盘台帐 → 合并本轮上传清单的改动(新填/修正/撤销) → 存回 → 套用整份台帐。
+    report_dir = Path(output_path).parent
+    report_dir.mkdir(parents=True, exist_ok=True)
+    ledger_path = report_dir / LEDGER_FILENAME
+    ledger = load_ledger(ledger_path)
+    upserts, deletes, src_name = read_uploaded_manual(input_path)
+    n_up, n_del = apply_ledger_changes(ledger, upserts, deletes, src=src_name)
+    if n_up or n_del:
+        save_ledger(ledger_path, ledger)
+    manual_costs = ledger_to_costmap(ledger)
+
     # Step 2: 读取采购表
     raw_df = load_data(input_path)
 
     # Step 3: 清洗（含成本回填 + 汇率）
     fx_service = ExchangeRateService()
     try:
-        clean_df, fill_report, zero_cost_df = clean_data(raw_df, fx_service, replen_master)
+        clean_df, fill_report, zero_cost_df = clean_data(
+            raw_df, fx_service, replen_master, manual_costs=manual_costs
+        )
     finally:
         fx_service.close()
 
@@ -1014,9 +1259,8 @@ def run_pipeline(
     dashboard_data = compute_dashboard_data(clean_df, styles_df, store_configs)
     save_json(dashboard_data, output_path)
 
-    # Step 7: 输出回填报告和待处理清单
-    report_dir = Path(output_path).parent
-    _save_reports(report_dir, fill_report, replen_master, zero_cost_df)
+    # Step 7: 输出回填报告和待处理清单（report_dir / ledger 已在 Step 1.5 准备好）
+    _save_reports(report_dir, fill_report, replen_master, zero_cost_df, ledger=ledger)
 
     # Step 8: 输出采购明细表
     _save_purchase_detail(clean_df, report_dir)
