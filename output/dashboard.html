@@ -158,34 +158,59 @@ body {
   display: flex; align-items: center; justify-content: space-between;
 }
 .rank-panel-title { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px; }
-.rank-list { max-height: 380px; overflow-y: auto; padding: 0; }
+.rank-list { max-height: 440px; overflow-y: auto; padding: 0; }
 .rank-list::-webkit-scrollbar { width: 4px; }
 .rank-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-.rank-table { width: 100%; border-collapse: collapse; }
-.rank-table th {
-  position: sticky; top: 0; z-index: 1;
-  background: var(--surface2); font-size: 10px; color: var(--text-muted); font-weight: 600;
-  padding: 6px 6px; text-align: right; cursor: pointer; user-select: none;
-  white-space: nowrap; border-bottom: 1px solid var(--border); transition: color .15s;
+
+/* 排序条（粘顶，点击切换排序指标 / 升降序） */
+.rank-sortbar {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; gap: 4px; padding: 8px 10px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
 }
-.rank-table th:hover { color: var(--accent); }
-.rank-table th.sort-active { color: var(--accent); }
-.rank-table th:first-child { text-align: center; width: 28px; cursor: default; }
-.rank-table th:nth-child(2) { text-align: left; }
-.rank-table td { font-size: 11px; padding: 7px 6px; text-align: right; color: var(--text-dim); border-bottom: 1px solid rgba(30,41,59,0.4); }
-.rank-table td:first-child { text-align: center; }
-.rank-table td:nth-child(2) { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80px; }
-.rank-table tr:hover td { background: var(--surface2); }
-.rank-table .rank-num-cell {
-  width: 20px; height: 20px; border-radius: 5px;
+.sort-chip {
+  flex: 1; min-width: 0;
+  background: transparent; color: var(--text-muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 2px; font-size: 10px; font-weight: 600; font-family: inherit;
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.sort-chip:hover { color: var(--accent); border-color: var(--accent); }
+.sort-chip.active { color: var(--accent); border-color: var(--accent); background: rgba(56,189,248,0.1); }
+.sort-arrow { font-size: 9px; margin-left: 2px; }
+
+/* 排名条目：双行布局 —— 第1行 ID 独占整行，第2行指标可换行，杜绝重叠 */
+.rank-item { padding: 9px 12px; border-bottom: 1px solid rgba(30,41,59,0.4); transition: background .15s; }
+.rank-item:hover { background: var(--surface2); }
+.rank-item-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.rank-num-cell {
+  width: 20px; height: 20px; border-radius: 5px; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
   font-size: 10px; font-weight: 700; font-family: 'DM Sans';
   background: var(--surface2); color: var(--text-muted);
 }
-.rank-table tr:nth-child(1) .rank-num-cell { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #0a0e17; }
-.rank-table tr:nth-child(2) .rank-num-cell { background: linear-gradient(135deg, #94a3b8, #64748b); color: #0a0e17; }
-.rank-table tr:nth-child(3) .rank-num-cell { background: linear-gradient(135deg, #b45309, #92400e); color: #fde68a; }
-.sort-arrow { font-size: 9px; margin-left: 2px; }
+.rank-item.rank-top1 .rank-num-cell { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #0a0e17; }
+.rank-item.rank-top2 .rank-num-cell { background: linear-gradient(135deg, #94a3b8, #64748b); color: #0a0e17; }
+.rank-item.rank-top3 .rank-num-cell { background: linear-gradient(135deg, #b45309, #92400e); color: #fde68a; }
+.rank-item-id {
+  flex: 1; min-width: 0;
+  font-family: 'DM Sans', monospace; font-size: 12px; font-weight: 600;
+  color: var(--text); letter-spacing: .3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 指标块：固定 2 列网格 → GMV｜成本单价 / 销量｜毛利率，永远两行四格，绝不参差。
+   每格 label 不缩，value 自身 ellipsis 截断 → 数值再长也只截断自身，绝不推挤邻格（杜绝重叠）。 */
+.rank-item-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 10px; padding-left: 28px; }
+.rank-item-metrics .rm {
+  display: flex; align-items: baseline; gap: 3px; min-width: 0;
+  font-size: 11px; color: var(--text-dim); font-family: 'DM Sans', sans-serif;
+}
+.rank-item-metrics .rm i { flex-shrink: 0; font-style: normal; color: var(--text-muted); font-size: 10px; }
+.rank-item-metrics .rm .rm-val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-item-metrics .rm-active { color: var(--text); font-weight: 700; }
+.rank-item-metrics .rm-active i { color: var(--accent); }
+.rank-empty { text-align: center; color: var(--text-muted); padding: 20px; font-size: 12px; }
 
 /* ── Error ── */
 .error-box {
@@ -623,7 +648,7 @@ function render() {
           </div>
         </div>
         <div class="rank-list" id="rank-${cat}">
-          ${buildRankTable(catStyles, cat, 'margin', 'desc')}
+          ${buildRankList(catStyles, cat, 'margin', 'desc')}
         </div>
       </div>`;
   });
@@ -670,48 +695,59 @@ function downloadFile(filename) {
   window.open('/download/' + encodeURIComponent(filename), '_blank');
 }
 
-// ── 排名表格（同时显示 GMV / 销售量 / 毛利率，可点击排序） ──
+// ── 排名看板（双行卡片：ID 独占一行，指标行可换行 → 永不重叠；可点击排序） ──
 const rankSortState = {};  // { cat: { metric: 'margin', dir: 'desc' } }
 
-function buildRankTable(items, cat, sortMetric, sortDir) {
+// 第一性原理：成本单价 = 单位成本 = (售价 - 利润) / 件数 = (gmv - profit) / qty
+//   gmv/profit/qty 均已在 JSON 内，无需改后端、无需重跑管道（奥卡姆剃刀）。
+function costUnit(s) { return s.qty > 0 ? (s.gmv - s.profit) / s.qty : 0; }
+
+function buildRankList(items, cat, sortMetric, sortDir) {
   rankSortState[cat] = { metric: sortMetric, dir: sortDir };
 
-  const sorted = [...items].sort((a, b) => {
-    const key = sortMetric === 'gmv' ? 'gmv' : sortMetric === 'qty' ? 'qty' : 'margin_rate';
-    return sortDir === 'desc' ? b[key] - a[key] : a[key] - b[key];
-  });
+  // 排序键：gmv / 成本单价 / 销量 / 毛利率
+  const keyFn = ({
+    gmv:    s => s.gmv,
+    cost:   s => costUnit(s),
+    qty:    s => s.qty,
+    margin: s => s.margin_rate,
+  })[sortMetric] || (s => s.margin_rate);
+
+  const sorted = [...items].sort((a, b) =>
+    sortDir === 'desc' ? keyFn(b) - keyFn(a) : keyFn(a) - keyFn(b));
   const top = sorted.slice(0, 20);
 
-  function thArrow(metric) {
-    if (rankSortState[cat].metric !== metric) return '';
-    return `<span class="sort-arrow">${rankSortState[cat].dir === 'desc' ? '▼' : '▲'}</span>`;
-  }
-  function thClass(metric) {
-    return rankSortState[cat].metric === metric ? 'sort-active' : '';
-  }
-
-  let html = `<table class="rank-table">
-    <thead><tr>
-      <th>#</th><th>商品ID</th>
-      <th class="${thClass('gmv')}" onclick="toggleRankSort('${cat}','gmv')">GMV${thArrow('gmv')}</th>
-      <th class="${thClass('qty')}" onclick="toggleRankSort('${cat}','qty')">销售量${thArrow('qty')}</th>
-      <th class="${thClass('margin')}" onclick="toggleRankSort('${cat}','margin')">毛利率${thArrow('margin')}</th>
-    </tr></thead><tbody>`;
+  // ── 排序条 ──
+  const arrow = sortDir === 'desc' ? '▼' : '▲';
+  const chip = (metric, label) => {
+    const on = sortMetric === metric;
+    return `<button class="sort-chip ${on ? 'active' : ''}" onclick="toggleRankSort('${cat}','${metric}')">${label}${on ? `<span class="sort-arrow">${arrow}</span>` : ''}</button>`;
+  };
+  let html = `<div class="rank-sortbar">${chip('gmv','GMV')}${chip('cost','成本单价')}${chip('qty','销量')}${chip('margin','毛利率')}</div>`;
 
   if (!top.length) {
-    html += `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px;font-size:12px">暂无数据</td></tr>`;
-  } else {
-    top.forEach((item, i) => {
-      html += `<tr>
-        <td><span class="rank-num-cell">${i + 1}</span></td>
-        <td title="${item.style_id}">${item.style_id}</td>
-        <td style="font-family:'DM Sans';font-weight:${sortMetric==='gmv'?'700':'400'}">¥${fmtNum(item.gmv)}</td>
-        <td style="font-family:'DM Sans';font-weight:${sortMetric==='qty'?'700':'400'}">${fmtNum(item.qty, 0)}</td>
-        <td style="font-family:'DM Sans';font-weight:${sortMetric==='margin'?'700':'400'};color:${item.margin_rate >= (DB.config.global_margin_warning||35) ? 'var(--good)' : 'var(--warn)'}">${item.margin_rate.toFixed(1)}%</td>
-      </tr>`;
-    });
+    return html + `<div class="rank-empty">暂无数据</div>`;
   }
-  html += '</tbody></table>';
+
+  const warnTh = DB.config.global_margin_warning || 35;
+  top.forEach((item, i) => {
+    const cu = costUnit(item);
+    const rm = (m, label, valHTML) =>
+      `<span class="rm ${sortMetric === m ? 'rm-active' : ''}"><i>${label}</i><span class="rm-val">${valHTML}</span></span>`;
+    const marginVal = `<b style="color:${item.margin_rate >= warnTh ? 'var(--good)' : 'var(--warn)'}">${item.margin_rate.toFixed(1)}%</b>`;
+    html += `<div class="rank-item ${i < 3 ? 'rank-top' + (i + 1) : ''}">
+      <div class="rank-item-top">
+        <span class="rank-num-cell">${i + 1}</span>
+        <span class="rank-item-id" title="${item.style_id}">${item.style_id}</span>
+      </div>
+      <div class="rank-item-metrics">
+        ${rm('gmv','GMV', '¥' + fmtNum(item.gmv))}
+        ${rm('cost','成本单价', item.qty > 0 ? '¥' + fmtNum(cu) : '—')}
+        ${rm('qty','销量', fmtNum(item.qty, 0))}
+        ${rm('margin','毛利率', marginVal)}
+      </div>
+    </div>`;
+  });
   return html;
 }
 
@@ -724,7 +760,7 @@ function toggleRankSort(cat, metric) {
     newDir = 'desc';
   }
   const styles = getFilteredStyles().filter(s => s.category === cat);
-  document.getElementById(`rank-${cat}`).innerHTML = buildRankTable(styles, cat, metric, newDir);
+  document.getElementById(`rank-${cat}`).innerHTML = buildRankList(styles, cat, metric, newDir);
 }
 
 // ── 启动 ──
