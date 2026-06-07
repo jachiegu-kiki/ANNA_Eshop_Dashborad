@@ -1,24 +1,28 @@
 """
-电商店铺数据看板 — 数据清洗与分类计算管道 v3
+电商店铺数据看板 — 数据清洗与分类计算管道 v4
 =============================================
-v3 更新（基于v2）：
-- 新增: 补货备货成本回填模块，解决台湾发货/福州仓库出/厂家出货成本为0的问题
-- 新增: 统一补货备货明细表生成（cost_collector）
-- 新增: 加权平均法回填采购成本（cost_filler）
-- 新增: 待人工处理清单输出（未匹配SKU + 补货表漏填采购价）
-- 改进: 支持A/B组采购表列名差异自动适配
-- 保留: v2 全部逻辑不变（分摊、汇率、分类、看板JSON）
+v4 更新（基于v3）：
+- 新增: 商品资料库价格表查找层（货品编码 → 成本价），作为补货加权平均之后、人工台账之前的自动兜底
+- 新增: 商品资料库价格表持久化缓存（output/商品资料库价格表.json），replace 模式归档后仍可用
+- 保留: v3 全部逻辑不变（补货加权平均、人工台账、待人工清单、看板JSON）
+
+成本回填优先级（自动在前，人工在后，使流到人工的行最少）：
+  ① 采购表原生成本 → ② 补货表加权平均 → ③ 商品资料库 → ④ 人工台账 → 待人工处理
 
 数据流:
-  补货备货申请表(A组+B组)
-       ↓ cost_collector
-  统一补货明细表
-       ↓ cost_filler (加权平均)
-  采购表(成本已回填) → clean_data → 聚合 → 分类 → JSON看板
+  补货备货申请表(A组+B组)        商品资料库(货品编码→成本价)
+       ↓ cost_collector              ↓ build_catalog_costmap
+  统一补货明细表 ──┐          ┌── 价格字典 {sku: cost}
+                   ↓          ↓
+  采购表 → clean_data(②加权 → ③资料库 → ④人工) → 聚合 → 分类 → JSON看板
+                                  ↓
+                            待人工处理清单(仍未匹配的行)
 
 运行方式:
-  python ecom_pipeline_v3.py --input ./uploads_raw --output ./output/dashboard_data.json \
-      --replen-a ./data/A组备货补货申请表.xlsx --replen-b ./data/B组补货申请表.xlsx
+  python ecom_pipeline.py --input ./uploads_raw --output ./output/dashboard_data.json \
+      --replen-a ./data/A组备货补货申请表.xlsx --replen-b ./data/B组补货申请表.xlsx \
+      --catalog ./data/A组商品资料库.xlsx
+  （以上路径均可省略；不传时自动在 uploads_raw 目录按文件名关键词发现）
 
 依赖：pip install pandas openpyxl xlrd requests
 """
@@ -365,6 +369,120 @@ def _compute_weighted_avg(replen_df, sku, as_of_date) -> float:
     return round(total_amount / total_qty, 2) if total_qty > 0 else 0.0
 
 
+# --- 3c. 商品资料库价格表 (v4 新增) ---
+#
+# 设计（第一性原理 / 奥卡姆）：
+#   商品资料库 = 一本「价格字典」，唯一职责是 货品编码 → 成本价。
+#   它没有采购批次/数量语义（不像补货表要加权平均），所以最简表示就是
+#   {货品编码: 成本价}，不引入任何多余结构。
+#
+#   插入位置（逆向：让最少的行流到人工）：
+#     ① 采购表原生 → ② 补货加权平均 → ③ 商品资料库(本模块) → ④ 人工台账 → 待人工处理
+#   资料库命中的行状态=「资料库匹配」(≠未匹配)，故被现有清单逻辑自动排除，
+#   无需改动待人工清单生成代码。
+#
+#   持久化（沿用台账设计语言）：
+#     解析后把价格表缓存到 output/商品资料库价格表.json。app.py 的 replace 模式
+#     每次上传会归档 uploads_raw，资料库 3641 行若每次都要重传必丢；有缓存兜底后，
+#     没传资料库文件时自动读缓存，跨上传不丢。
+#
+#   重复货品编码：同一编码多条不同成本 → 取最新日期那条（最贴近当前成本）；
+#                无日期则后出现者覆盖前者。确定性、无歧义。
+
+CATALOG_KEYWORDS       = ("商品资料", "商品資料", "资料库", "資料庫")
+CATALOG_SKU_COL        = "货品编码"
+CATALOG_COST_COL       = "成本价"
+CATALOG_DATE_COL       = "日期"
+CATALOG_CACHE_FILENAME = "商品资料库价格表.json"
+
+
+def _read_catalog_sheet(filepath: str) -> pd.DataFrame:
+    """读取商品资料库 sheet：优先含关键词的 sheet，表头默认第3行(header=2)，
+    缺列时自动扫描前10行兜底定位表头。"""
+    xl = pd.ExcelFile(filepath, engine="openpyxl")
+    sheet = next((s for s in xl.sheet_names
+                  if any(k in s for k in CATALOG_KEYWORDS)), xl.sheet_names[0])
+    df = pd.read_excel(filepath, sheet_name=sheet, header=2, engine="openpyxl")
+    if CATALOG_SKU_COL in df.columns and CATALOG_COST_COL in df.columns:
+        return df
+    # 兜底：表头不在第3行 → 扫描定位
+    raw = pd.read_excel(filepath, sheet_name=sheet, header=None, nrows=10, engine="openpyxl")
+    for i in range(len(raw)):
+        names = {str(v).strip() for v in raw.iloc[i] if pd.notna(v)}
+        if CATALOG_SKU_COL in names and CATALOG_COST_COL in names:
+            return pd.read_excel(filepath, sheet_name=sheet, header=i, engine="openpyxl")
+    return df
+
+
+def build_catalog_costmap(filepath: Optional[str], cache_dir: Optional[Path] = None) -> Dict[str, float]:
+    """
+    构建商品资料库价格表: {货品编码(标准化): 成本价}。
+    优先级：传了文件→解析并刷新缓存；没传文件→读持久化缓存；都没有→空。
+    任何异常都降级为空表（绝不让资料库问题阻断主流程）。
+    """
+    cache_path = (cache_dir / CATALOG_CACHE_FILENAME) if cache_dir else None
+
+    # ── 无文件：尝试读持久化缓存（replace 模式下资料库被归档后仍可用）──
+    if not filepath or not Path(filepath).exists():
+        if cache_path and cache_path.exists():
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                cm = {_norm_sku(k): round(float(v), 2)
+                      for k, v in raw.items() if float(v) > 0}
+                logger.info(f"商品资料库价格表(缓存)已载入: {len(cm)} 个货品编码")
+                return cm
+            except Exception as e:
+                logger.warning(f"商品资料库缓存损坏，按空处理: {e}")
+        logger.info("未提供商品资料库，跳过资料库查找")
+        return {}
+
+    # ── 有文件：解析 ──
+    try:
+        df = _read_catalog_sheet(filepath)
+    except Exception as e:
+        logger.warning(f"商品资料库读取失败，跳过: {e}")
+        return {}
+
+    if CATALOG_SKU_COL not in df.columns or CATALOG_COST_COL not in df.columns:
+        logger.warning(f"商品资料库缺少必要列({CATALOG_SKU_COL}/{CATALOG_COST_COL})，跳过。"
+                       f"实际列: {list(df.columns)}")
+        return {}
+
+    out = pd.DataFrame({
+        "sku":  df[CATALOG_SKU_COL].apply(_norm_sku),
+        "cost": pd.to_numeric(df[CATALOG_COST_COL], errors="coerce"),
+    })
+    out["date"] = (df[CATALOG_DATE_COL].apply(_parse_excel_date)
+                   if CATALOG_DATE_COL in df.columns else pd.NaT)
+
+    # 只留有效行：编码非空 + 成本>0
+    out = out[(out["sku"] != "") & (out["cost"].fillna(0) > 0)].copy()
+    if out.empty:
+        logger.warning("商品资料库无有效记录（编码空或成本≤0）")
+        return {}
+
+    # 重复编码：按日期升序，最新(末位)覆盖前者
+    out = out.sort_values("date", na_position="first")
+    dup = int(out["sku"].duplicated(keep="last").sum())
+    costmap = {sku: round(float(c), 2) for sku, c in zip(out["sku"], out["cost"])}
+    if dup:
+        logger.info(f"商品资料库去重: {dup} 条重复货品编码，取最新日期成本")
+    logger.info(f"商品资料库价格表: {len(costmap)} 个唯一货品编码")
+
+    # 持久化缓存（跨 replace 上传保留）
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(costmap, f, ensure_ascii=False)
+            logger.info(f"商品资料库价格表已缓存: {cache_path}")
+        except Exception as e:
+            logger.warning(f"商品资料库缓存写入失败(不影响本轮): {e}")
+
+    return costmap
+
+
 # ── 人工成本台帐（服务器端单一事实来源）──
 #
 # 设计（第一性原理 / 逆向）：
@@ -526,6 +644,7 @@ def fill_purchase_costs(
     purchase_df: pd.DataFrame,
     replen_df: pd.DataFrame,
     manual_costs: Optional[Dict[Tuple[str, str], float]] = None,
+    catalog_costs: Optional[Dict[str, float]] = None,
     method_col: str = "采购方式",
     cost_col: str = "cost_price",
     sku_col: str = "sku_code",
@@ -537,13 +656,17 @@ def fill_purchase_costs(
 
     成本优先级（第一性原理 / 奥卡姆：单一职责，只填 cost<=0 的行）：
       ① 采购表原生成本价 (cost>0)      —— 不动，最高优先（需求4：采购表补上即以它为主）
-      ② 补货备货表加权平均             —— 系统自动
-      ③ 员工人工填写 (manual_costs)    —— 兜底，仅当 ①② 都拿不到价时生效
+      ② 补货备货表加权平均             —— 系统自动（按 货品编码 + 采购日期）
+      ③ 商品资料库查找 (catalog_costs) —— 系统自动（按 货品编码），v4新增
+      ④ 员工人工填写 (manual_costs)    —— 兜底，仅当 ①②③ 都拿不到价时生效
 
-    manual_costs: {(订单号, 货品编码): 成本单价}
+    逆向：自动来源(②③)排在人工(④)前，资料库越全，流到人工的行越少。
+    catalog_costs: {货品编码: 成本单价}
+    manual_costs:  {(订单号, 货品编码): 成本单价}
     返回 (回填后的df, 回填报告df)。
     """
     manual_costs = manual_costs or {}
+    catalog_costs = catalog_costs or {}
     df = purchase_df.copy()
 
     # 标准化 SKU
@@ -560,15 +683,17 @@ def fill_purchase_costs(
     )
     fill_indices = df[need_fill].index
     logger.info(f"成本回填: 需要处理 {len(fill_indices)} 行 "
-                f"(加权平均源={'有' if not replen_df.empty else '无'}, 人工成本={len(manual_costs)} 条)")
+                f"(加权平均源={'有' if not replen_df.empty else '无'}, "
+                f"资料库={len(catalog_costs)} 条, 人工成本={len(manual_costs)} 条)")
 
-    # 即使无补货源，只要有人工成本也要继续（员工二次回传场景）
+    # 即使无补货源，只要有资料库或人工成本也要继续（员工二次回传 / 资料库兜底场景）
     if len(fill_indices) == 0:
         return df, pd.DataFrame()
 
     cache = {}
     report_rows = []
     filled_avg = 0
+    filled_catalog = 0
     filled_manual = 0
 
     for idx in fill_indices:
@@ -589,14 +714,21 @@ def fill_purchase_costs(
             filled_avg += 1
             status, source, applied = "已回填", "加权平均", avg
         else:
-            # ③ 人工填写兜底（精确匹配 订单号 + 货品编码）
-            manual = manual_costs.get((oid, sku), 0)
-            if manual and manual > 0:
-                df.at[idx, cost_col] = manual
-                filled_manual += 1
-                status, source, applied = "人工已填", "人工填写", manual
+            # ③ 商品资料库查找（按 货品编码）
+            cat = catalog_costs.get(sku, 0)
+            if cat and cat > 0:
+                df.at[idx, cost_col] = cat
+                filled_catalog += 1
+                status, source, applied = "资料库匹配", "商品资料库", cat
             else:
-                status, source, applied = "未匹配", "", 0
+                # ④ 人工填写兜底（精确匹配 订单号 + 货品编码）
+                manual = manual_costs.get((oid, sku), 0)
+                if manual and manual > 0:
+                    df.at[idx, cost_col] = manual
+                    filled_manual += 1
+                    status, source, applied = "人工已填", "人工填写", manual
+                else:
+                    status, source, applied = "未匹配", "", 0
 
         report_rows.append({
             "行号": idx, "货品编码": sku, "采购方式": df.at[idx, method_col],
@@ -607,8 +739,8 @@ def fill_purchase_costs(
         })
 
     report_df = pd.DataFrame(report_rows)
-    unmatched_n = len(fill_indices) - filled_avg - filled_manual
-    logger.info(f"成本回填完成: 加权={filled_avg}, 人工={filled_manual}, "
+    unmatched_n = len(fill_indices) - filled_avg - filled_catalog - filled_manual
+    logger.info(f"成本回填完成: 加权={filled_avg}, 资料库={filled_catalog}, 人工={filled_manual}, "
                 f"未匹配={unmatched_n}, 总={len(fill_indices)}")
     return df, report_df
 
@@ -655,9 +787,10 @@ def read_file(filepath: str) -> pd.DataFrame:
 
 def load_data(input_path: str, exclude_keywords: Optional[List[str]] = None) -> pd.DataFrame:
     if exclude_keywords is None:
-        # 排除补货表 + 系统生成的报表（尤其是员工回传的「待人工处理清单」），
-        # 避免它们被当成采购表读取而污染数据。
-        exclude_keywords = ["备货", "补货", "補貨", "处理清单", "處理清單", "回填报告", "回填報告"]
+        # 排除补货表 + 商品资料库 + 系统生成的报表（尤其是员工回传的「待人工处理清单」），
+        # 避免它们被当成采购表读取而污染数据 / 缺字段崩溃。
+        exclude_keywords = ["备货", "补货", "補貨", "处理清单", "處理清單", "回填报告", "回填報告",
+                            "资料库", "資料庫", "商品资料", "商品資料"]
     path = Path(input_path)
     if path.is_file():
         df = read_file(str(path))
@@ -762,6 +895,7 @@ def clean_data(
     fx_service: ExchangeRateService,
     replen_master: Optional[pd.DataFrame] = None,
     manual_costs: Optional[Dict[Tuple[str, str], float]] = None,
+    catalog_costs: Optional[Dict[str, float]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     数据清洗（v3）：
@@ -824,13 +958,15 @@ def clean_data(
     # 注意：无论是否有补货源/人工成本，都要跑回填 —— 因为「识别未匹配行」本身依赖它，
     #       否则首次上传(两者皆无)时候选行会被静默丢弃，无法生成待人工清单。
     manual_costs = manual_costs or {}
+    catalog_costs = catalog_costs or {}
     replen_for_fill = replen_master if replen_master is not None else pd.DataFrame()
     logger.info("=" * 40)
     logger.info(f"开始成本回填（加权平均源={'有' if not replen_for_fill.empty else '无'}, "
-                f"人工成本={len(manual_costs)} 条）")
+                f"资料库={len(catalog_costs)} 条, 人工成本={len(manual_costs)} 条）")
     df, fill_report = fill_purchase_costs(
         df, replen_for_fill,
         manual_costs=manual_costs,
+        catalog_costs=catalog_costs,
         method_col="purchase_method",
         cost_col="cost_price",
         sku_col="sku_code",
@@ -1154,6 +1290,8 @@ DEFAULT_TARGET_MARGIN = 35.0
 # ── 补货备货表默认路径（相对于脚本目录） ──
 DEFAULT_REPLEN_A_PATH = SCRIPT_DIR / "uploads_raw" / "A组备货补货申请表.xlsx"
 DEFAULT_REPLEN_B_PATH = SCRIPT_DIR / "uploads_raw" / "B组补货申请表.xlsx"
+# ── 商品资料库默认路径（v4） ──
+DEFAULT_CATALOG_PATH = SCRIPT_DIR / "uploads_raw" / "A组商品资料库.xlsx"
 
 
 def _auto_discover_replen(search_dir: Path) -> Tuple[Optional[str], Optional[str]]:
@@ -1182,6 +1320,19 @@ def _auto_discover_replen(search_dir: Path) -> Tuple[Optional[str], Optional[str
     return replen_a, replen_b
 
 
+def _auto_discover_catalog(search_dir: Path) -> Optional[str]:
+    """在指定目录及其父目录中自动查找商品资料库（文件名含 资料库/商品资料）。"""
+    search_dirs = [search_dir, search_dir.parent, SCRIPT_DIR, SCRIPT_DIR / "uploads_raw"]
+    for d in search_dirs:
+        if not d.exists():
+            continue
+        for f in d.glob("*.xlsx"):
+            if any(k in f.name for k in CATALOG_KEYWORDS):
+                logger.info(f"自动发现商品资料库: {f}")
+                return str(f)
+    return None
+
+
 @dataclass
 class PipelineResult:
     """管道运行结果"""
@@ -1195,6 +1346,7 @@ def run_pipeline(
     output_path: str,
     replen_a_path: Optional[str] = None,
     replen_b_path: Optional[str] = None,
+    catalog_path: Optional[str] = None,
     store_configs: Optional[List[StoreConfig]] = None,
 ) -> PipelineResult:
     """
@@ -1237,6 +1389,14 @@ def run_pipeline(
         save_ledger(ledger_path, ledger)
     manual_costs = ledger_to_costmap(ledger)
 
+    # Step 1.6: 商品资料库价格表（v4）
+    #   传了文件→解析并刷新缓存；没传→读 output 持久化缓存（replace 模式归档后仍可用）。
+    if not catalog_path and DEFAULT_CATALOG_PATH.exists():
+        catalog_path = str(DEFAULT_CATALOG_PATH)
+    if not catalog_path:
+        catalog_path = _auto_discover_catalog(Path(input_path))
+    catalog_costs = build_catalog_costmap(catalog_path, cache_dir=report_dir)
+
     # Step 2: 读取采购表
     raw_df = load_data(input_path)
 
@@ -1244,7 +1404,8 @@ def run_pipeline(
     fx_service = ExchangeRateService()
     try:
         clean_df, fill_report, zero_cost_df = clean_data(
-            raw_df, fx_service, replen_master, manual_costs=manual_costs
+            raw_df, fx_service, replen_master,
+            manual_costs=manual_costs, catalog_costs=catalog_costs,
         )
     finally:
         fx_service.close()
@@ -1277,9 +1438,10 @@ def run_pipeline(
     logger.info(f"  总销量: {s['kpi']['qty']:,} 件")
     logger.info(f"  综合毛利率: {s['kpi']['margin_rate']}%")
     if not fill_report.empty:
-        filled_count = (fill_report["状态"] == "已回填").sum()
+        filled_count = (fill_report["状态"] != "未匹配").sum()
         total_fill = len(fill_report)
-        logger.info(f"  成本回填: {filled_count}/{total_fill} 成功")
+        catalog_count = (fill_report["回填来源"] == "商品资料库").sum() if "回填来源" in fill_report.columns else 0
+        logger.info(f"  成本回填: {filled_count}/{total_fill} 成功（其中资料库 {catalog_count} 条）")
     logger.info("=" * 60)
 
     return PipelineResult(dashboard_data, fill_report, replen_master)
@@ -1291,6 +1453,7 @@ def main():
     parser.add_argument("--output", "-o", default=None, help="输出JSON路径")
     parser.add_argument("--replen-a", default=None, help="A组备货补货申请表路径")
     parser.add_argument("--replen-b", default=None, help="B组补货申请表路径")
+    parser.add_argument("--catalog", default=None, help="商品资料库路径（货品编码→成本价 查找表）")
     parser.add_argument("--target-margin", type=float, default=None, help="统一目标毛利率(%)")
     args = parser.parse_args()
 
@@ -1313,6 +1476,7 @@ def main():
         str(input_path), str(output_path),
         replen_a_path=args.replen_a,
         replen_b_path=args.replen_b,
+        catalog_path=args.catalog,
         store_configs=configs,
     )
 
